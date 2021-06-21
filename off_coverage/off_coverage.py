@@ -143,7 +143,7 @@ def add_feature_argument(parser, *args, **kwargs):
 
 def hexdigest(s):
     ## Uncomment for debugging
-    #return f"<{s}>"
+    #return f"<{s.replace(' ', '_')}>"
     return hashlib.sha256(s.encode("ascii")).hexdigest()
 
 # Each function call gets its own trace.
@@ -164,8 +164,9 @@ class PerFunctionTracer:
         signatures = set()
         for (func_name, tracer) in self.tracers:
             #print("Func:", k)
-            s = f"func {func_name}: {tracer.get_signature()}"
-            signatures.add(hexdigest(s))
+            s = f"func: {func_name} {tracer.get_signature()}"
+            #signatures.add(hexdigest(s))
+            signatures.add(s)
             
         return signatures
 
@@ -198,8 +199,10 @@ class TraceLineCoverage:
         self.linenos = set()
         
     def get_signature(self):
-        s = str(sorted(self.linenos))
-        return hexdigest(f"cover: {s}")
+        s = str(sorted(self.linenos)).replace(" ", "")
+        s = f"<cover: {s}>"
+        return s
+        #return hexdigest(f"cover: {s}")
 
     def local_trace(self, frame, event, arg):
         lineno = None
@@ -230,8 +233,10 @@ class TraceLineSequence:
             self.linenos.append(lineno)
 
     def get_signature(self):
-        s = str(self.linenos)
-        return hexdigest(f"seq: {s}")
+        s = str(self.linenos).replace(" ", "")
+        s = f"<seq: {s}>"
+        return s
+        #return hexdigest(f"seq: {s}")
 
 class TraceLinePairs:
     def __init__(self):
@@ -252,8 +257,10 @@ class TraceLinePairs:
             self._prev_lineno = lineno
 
     def get_signature(self):
-        s = str(sorted(self.pairs))
-        return hexdigest(f"pairs: {s}")
+        s = str(sorted(self.pairs)).replace(" ", "")
+        s = f"<pairs: {s}>"
+        return s
+        #return hexdigest(f"pairs: {s}")
     
 
 class ToolkitTracer:
@@ -299,7 +306,9 @@ class ToolkitTracer:
         signatures = set()
         for module_name, module_tracer in self.module_tracers.items():
             for sig in module_tracer.get_signatures():
-                signatures.add(hexdigest(f"mod: {module_name} {sig}"))
+                s = f"<mod: {module_name} {sig}>"
+                # s = hexdigest(s)
+                signatures.add(s)
         return signatures
 
     def clear(self):
@@ -315,7 +324,8 @@ class ToolkitTracer:
     def add_features(self, state):
         if self.module_tracers:
             for sig in self.get_signatures():
-                state.add_feature(f"trace_{sig}")
+                digest = hexdigest(sig)
+                state.add_feature(f"trace_{digest}", sig)
 
     @contextlib.contextmanager
     def using_state(self, state):
@@ -378,7 +388,28 @@ def add_trace_argument(parser):
         default = "off",
         help = "trace option",
         )
-                    
+
+#### Description logger
+
+class DescriptionLogger:
+    def __init__(self, outfile):
+        self.outfile = outfile
+        self._seen = set()
+        
+    def add(self, feature, description):
+        if feature not in self._seen:
+            self._seen.add(feature)
+            self.outfile.write(f"{feature}\t{description}\n")
+            self.outfile.flush()
+
+def get_description_logger(parser, filename):
+    if filename is None:
+        return None
+    try:
+        outfile = open(filename, "w")
+    except OSError as err:
+        parser.error(f"Cannot open --description file: {err}")
+    return DescriptionLogger(outfile)
 
 ####
 
@@ -711,12 +742,19 @@ def add_default_argument(p):
         "--default",
         action = "store_true",
         help = "use all of the default tools (plus any other ones you might specify)")
-    
+
 def add_quiet_argument(p):
     p.add_argument(
         "--quiet", "-q",
         action = "store_true",
         help = "do not display status message",
+        )
+    
+def add_description_argument(p):
+    p.add_argument(
+        "--description", "-D",
+        metavar = "FILENAME",
+        help = "write feature descriptions to the named file",
         )
     
 def add_output_argument(p):
@@ -762,17 +800,20 @@ class FilterTool:
         return False
 
 class State:
-    def __init__(self, id, mol, reporter, features=None):
+    def __init__(self, id, mol, reporter, features=None, description_logger=None):
         self.id = id
         self.mol = mol
         self.reporter = reporter
         if features is None:
             features = set()
         self.features = features
+        self.description_logger = description_logger
         self.cache = {}
 
-    def add_feature(self, feature):
+    def add_feature(self, feature, description=None):
         self.features.add(feature)
+        if description is not None and self.description_logger is not None:
+            self.description_logger.add(feature, description)
 
 class Reporter:
     def status(self, msg):
@@ -1639,6 +1680,7 @@ for tool in (openeye_filter_tools + openeye_feature_tools):
 
 add_trace_argument(openeye_parser)
 add_quiet_argument(openeye_parser)
+add_description_argument(openeye_parser)
 add_output_argument(openeye_parser)
 add_filename_argument(openeye_parser)
 
@@ -1667,11 +1709,13 @@ def openeye_command(parser, args):
         
     outfile = open_output(args.output)
     reporter = get_reporter(args.quiet)
-
+    
     tracer = get_tracer(args.trace)
+    description_logger = get_description_logger(parser, args.description)
     
     for id, mol in iter_ids_and_oegraphmols(ifs, args.id_tag):
-        state = State(id, mol, reporter)
+        state = State(id, mol, reporter,
+                          description_logger = description_logger)
         
         if any(filter_tool.at_start(state) for filter_tool in filter_tools):
             continue
@@ -2209,6 +2253,7 @@ for tool in (rdkit_filter_tools + rdkit_feature_tools):
 
 add_trace_argument(rdkit_parser)
 add_quiet_argument(rdkit_parser)
+add_description_argument(rdkit_parser)
 add_output_argument(rdkit_parser)
 add_filename_argument(rdkit_parser)
 
@@ -2238,9 +2283,11 @@ def rdkit_command(parser, args):
     reporter = get_reporter(args.quiet)
 
     tracer = get_tracer(args.trace)
+    description_logger = get_description_logger(parser, args.description)
         
     for id, mol in reader:
-        state = State(id, mol, reporter)
+        state = State(id, mol, reporter,
+                          description_logger = description_logger)
         if any(filter_tool.at_start(state) for filter_tool in filter_tools):
             continue
 
@@ -2618,6 +2665,7 @@ for tool in (xcompare_filter_tools + xcompare_feature_tools):
 
 add_trace_argument(xcompare_parser)
 add_quiet_argument(xcompare_parser)
+add_description_argument(xcompare_parser)
 add_output_argument(xcompare_parser)
 add_filename_argument(xcompare_parser)
 
@@ -2652,10 +2700,12 @@ def xcompare_command(parser, args):
     reporter = get_reporter(args.quiet)
 
     tracer = get_tracer(args.trace)
+    description_logger = get_description_logger(parser, args.description)
     
     for recno, (id, text_mol) in enumerate(reader, 1):
         assert id, f"Missing id for record #{recno}"
-        state = State(id, text_mol, reporter)
+        state = State(id, text_mol, reporter,
+                          description_logger = description_logger)
         if seen_ids_filter is not None and seen_ids_filter.at_start(state):
             continue
         
@@ -2680,11 +2730,13 @@ def xcompare_command(parser, args):
         rd_warnings.add_features(state)
 
         if rdmol is not None and oemol is not None:
-            oe_state = State(id, oemol, reporter, features = state.features)
+            oe_state = State(id, oemol, reporter, features = state.features,
+                                 description_logger = description_logger)
             if component_filter is not None and component_filter.at_start(oe_state):
                 continue
 
-            rd_state = State(id, rdmol, reporter, features = state.features)
+            rd_state = State(id, rdmol, reporter, features = state.features,
+                                 description_logger = description_logger)
 
             state.oe_state = oe_state
             state.rd_state = rd_state
