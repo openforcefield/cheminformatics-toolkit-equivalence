@@ -2367,53 +2367,59 @@ def _compile_tag_pattern(tag):
     return re.compile(f"\n>.*<{escaped_tag}>.*\n(([^\r\n]|\r[^\n])*)\r?\n".encode("utf8"))
         
 def _iter_sdf_records(f, id_tag):
-    if id_tag is not None:
-        id_pat = _compile_tag_pattern(id_tag)
-    lineno = 0
-    prev_block = b""
-    while 1:
-        next_block = f.read(100_000)
-        if not next_block:
-            if prev_block:
-                die(f"Incomplete final SDF record at line {lineno}")
-            else:
-                return # Reached EOF
-            
-        block = prev_block + next_block
-
-        if len(block) > 300_000:
-            die("SDF record is too large")
-
-        start = 0
+    try:
+        if id_tag is not None:
+            id_tag_pat = _compile_tag_pattern(id_tag)
+        lineno = 0
+        prev_block = b""
         while 1:
-            m = _record_terminator.search(block, start)
-            if m is None:
-                break
-            end = m.end()
-            record = block[start:end]
-            if id_tag is None:
-                # Get the first line
-                id = record.partition(b"\n")[0].rstrip(b"\r").decode("utf8")
-            else:
-                # Search for the id tag 
-                id_tag_match = id_tag_pat.search(record)
-                if id_tag_match is None:
-                    id = None
+            next_block = f.read(100_000)
+            if not next_block:
+                if prev_block:
+                    die(f"Incomplete final SDF record at line {lineno}")
                 else:
-                    id = id_tag_match.group(1).decode("utf8")
-            yield id, TextRecord("sdf", record)
-            start = end
-            
-        prev_block = block[start:]
+                    return # Reached EOF
+
+            block = prev_block + next_block
+
+            if len(block) > 300_000:
+                die("SDF record is too large")
+
+            start = 0
+            while 1:
+                m = _record_terminator.search(block, start)
+                if m is None:
+                    break
+                end = m.end()
+                record = block[start:end]
+                if id_tag is None:
+                    # Get the first line
+                    id = record.partition(b"\n")[0].rstrip(b"\r").decode("utf8")
+                else:
+                    # Search for the id tag 
+                    id_tag_match = id_tag_pat.search(record)
+                    if id_tag_match is None:
+                        id = None
+                    else:
+                        id = id_tag_match.group(1).decode("utf8")
+                yield id, TextRecord("sdf", record)
+                start = end
+
+            prev_block = block[start:]
+    finally:
+        f.close()
 
 def _iter_smi_records(f):
-    for line in f:
-        terms = line.split(None, 1)
-        n = len(terms)
-        if n == 1:
-            yield None, TextRecord("smi", line)
-        elif n == 2:
-            yield terms[1].rstrip().decode("utf8"), TextRecord("smi", line)
+    try:
+        for line in f:
+            terms = line.split(None, 1)
+            n = len(terms)
+            if n == 1:
+                yield None, TextRecord("smi", line)
+            elif n == 2:
+                yield terms[1].rstrip().decode("utf8"), TextRecord("smi", line)
+    finally:
+        f.close()
  
 ### cross-compare with chemfp
 ## def check(filename, id_tag=None):
