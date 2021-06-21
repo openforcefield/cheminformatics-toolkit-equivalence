@@ -2345,13 +2345,30 @@ class TextRecord:
     def __init__(self, record_format, record):
         self.record_format = record_format
         self.record = record
-        
+
 # Simplistic record tokenizer.
 # Doesn't handle the many nuances of the SDF format.
+
+_record_terminator = re.compile(r"""
+(                         # If no data items:
+  \n
+  M\ \ END\s?\n           # 'M  END' on its own line
+  [$][$][$][$][^\n]*\n    # followed immediately by a line beginning
+                          # with four dollar signs.
+
+) | (                     # = If there are data items:
+  \n                      # Two blank lines,
+  \r?\n                   # 
+  [$][$][$][$][^\n]*\n    # followed by the '$$$$' line.
+)""".encode("ascii"), re.X)
+
+def _compile_tag_pattern(tag):
+    escaped_tag = re.escape(tag)
+    return re.compile(f"\n>.*<{escaped_tag}>.*\n(([^\r\n]|\r[^\n])*)\r?\n".encode("utf8"))
+        
 def _iter_sdf_records(f, id_tag):
     if id_tag is not None:
-        id_pat = re.compile(f">.*<{id_tag}>\r?\n".encode("utf8"))
-        to_eol_pat = re.compile(b"[^\r\n]*")
+        id_pat = _compile_tag_pattern(id_tag)
     lineno = 0
     prev_block = b""
     while 1:
@@ -2369,20 +2386,21 @@ def _iter_sdf_records(f, id_tag):
 
         start = 0
         while 1:
-            i = block.find(b"\n$$$$\n", start)
-            if i == -1:
+            m = _record_terminator.search(block, start)
+            if m is None:
                 break
-            end = i + 6
+            end = m.end()
             record = block[start:end]
             if id_tag is None:
+                # Get the first line
                 id = record.partition(b"\n")[0].rstrip(b"\r").decode("utf8")
             else:
-                tag_match = id_pat.search(record)
-                if tag_match is None:
+                # Search for the id tag 
+                id_tag_match = id_tag_pat.search(record)
+                if id_tag_match is None:
                     id = None
                 else:
-                    id_match = to_eol_pat.match(record, tag_match.end())
-                    id = id_match.group(0).decode("utf8")
+                    id = id_tag_match.group(1).decode("utf8")
             yield id, TextRecord("sdf", record)
             start = end
             
