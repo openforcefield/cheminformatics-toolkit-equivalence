@@ -287,7 +287,7 @@ class ToolkitTracer:
             else:
                 # check for prefix names
                 for name in self.module_names:
-                    if name[-1:] == "." and module_name.starts_with(name):
+                    if name[-1:] == "." and module_name.startswith(name):
                         can_trace = self._can_trace[module_name] = True
                         break
                 else:
@@ -363,7 +363,7 @@ _trace_options = {
 _trace_options["on"] = _trace_options["mod-cover"]
     
 def get_tracer(trace_type=None):
-    module_names = set(["openff.toolkit.utils.toolkits"])
+    module_names = set(["openff."])
     
     if trace_type is None or trace_type == "off":
         return NullTracer()
