@@ -2370,7 +2370,7 @@ def _iter_sdf_records(f, id_tag):
     try:
         if id_tag is not None:
             id_tag_pat = _compile_tag_pattern(id_tag)
-        lineno = 0
+        lineno = 1
         prev_block = b""
         while 1:
             next_block = f.read(100_000)
@@ -2403,6 +2403,7 @@ def _iter_sdf_records(f, id_tag):
                     else:
                         id = id_tag_match.group(1).decode("utf8")
                 yield id, TextRecord("sdf", record)
+                lineno += record.count(b"\n")
                 start = end
 
             prev_block = block[start:]
