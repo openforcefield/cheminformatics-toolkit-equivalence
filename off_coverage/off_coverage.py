@@ -64,15 +64,15 @@
 
 
 import argparse
+import ast
 import contextlib
+import gzip
+import hashlib
 import io
 import os
-import sys
-import ast
-import hashlib
-from collections import defaultdict, Counter
-import gzip
 import re
+import sys
+from collections import Counter, defaultdict
 
 __version__ = "0.9"
 __version_info__ = (0, 9, 0)
@@ -287,6 +287,8 @@ class ToolkitTracer:
                 can_trace = self._can_trace[module_name] = True
             else:
                 # check for prefix names
+                ## with open("/dev/ttys005", "w") as f:
+                ##     print(module_name, file=f)
                 for name in self.module_names:
                     if name[-1:] == "." and module_name.startswith(name):
                         can_trace = self._can_trace[module_name] = True
@@ -364,7 +366,7 @@ _trace_options = {
 _trace_options["on"] = _trace_options["mod-cover"]
     
 def get_tracer(trace_type=None):
-    module_names = set(["openff."])
+    module_names = set(["openff.", "toolkit.tests."])
     
     if trace_type is None or trace_type == "off":
         return NullTracer()
@@ -499,6 +501,7 @@ def load_descriptions(filename):
 ####
 
 import re
+
 _valid_name_pat = re.compile("[A-Za-z_][A-Za-z0-9_]*$")    
 
 TEST_PATTERNS = """
@@ -1031,7 +1034,7 @@ def capture_oe_warnings():
     if oe_msg_handler is not None:
         return
     
-    from openeye.oechem import OEThrow, OEErrorHandlerImplBase, OEErrorLevelToString
+    from openeye.oechem import OEErrorHandlerImplBase, OEErrorLevelToString, OEThrow
         
     class CaptureOEErrorHandler(OEErrorHandlerImplBase):
         def __init__(self):
@@ -1684,7 +1687,7 @@ class OECircularFeatureTool(FeatureTool):
         from openeye.oegraphsim import (
             OEFPAtomType_DefaultCircularAtom,
             OEFPBondType_DefaultCircularBond,
-            )
+        )
         return OECircularFeatureTool(
             8192,
             0, 3,
@@ -1772,7 +1775,7 @@ add_filename_argument(openeye_parser)
     
 
 def openeye_command(parser, args):
-    from openeye.oechem import oemolistream, OEGetSDData
+    from openeye.oechem import OEGetSDData, oemolistream
     
     ifs = oemolistream(args.filename)
 
@@ -2112,10 +2115,10 @@ class RDOpenFFFeatureTool(FeatureTool):
 
     def __init__(self):
         from openff.toolkit.utils import (
-            RDKitToolkitWrapper,
             MessageException,
+            RDKitToolkitWrapper,
             UndefinedStereochemistryError,
-            )
+        )
         self._wrapper = RDKitToolkitWrapper()
 
     def add_features(self, state):
@@ -2991,6 +2994,40 @@ merge_parser.set_defaults(
     subparser = merge_parser,
     )
 
+
+####
+
+subtract_parser = subparsers.add_parser(
+    "subtract",
+    help = "remove features from A which are present in B",
+    )
+
+add_output_argument(subtract_parser)
+subtract_parser.add_argument("filename1")
+subtract_parser.add_argument("filename2")
+
+def subtract_command(parser, args):
+    dataset1 = load_features(args.filename1)
+    dataset2 = load_features(args.filename2)
+
+    new_dataset = {}
+
+    for id, feature_list in dataset1.items():
+        if id not in dataset2:
+            new_dataset[id] = feature_list
+        else:
+            # Don't remove feature weights
+            remove_features = set(feature for feature in dataset2[id] if "=" not in feature)
+            new_dataset[id] = [feature for feature in feature_list if feature not in remove_features]
+            
+    outfile = open_output(args.output)
+    for id, feature_list in new_dataset.items():
+        write_features(outfile, id, feature_list)
+
+subtract_parser.set_defaults(
+    command = subtract_command,
+    subparser = subtract_parser,
+    )
 
 ####
 
