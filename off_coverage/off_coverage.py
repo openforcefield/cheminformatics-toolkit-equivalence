@@ -66,6 +66,7 @@
 import argparse
 import contextlib
 import io
+import os
 import sys
 import ast
 import hashlib
@@ -374,6 +375,77 @@ def get_tracer(trace_type=None):
 
     return ToolkitTracer(module_names, module_tracer_class, function_tracer_class)
 
+# Experimental. Has quadradic behaviour.
+## @contextlib.contextmanager
+## def one_shot(filename, id, trace_type="mod-pairs"):
+##     tracer = get_tracer(trace_type)
+## 
+##     description_filename = filename + ".description"
+##     if os.path.exists(description_filename):
+##         descriptions = load_descriptions(description_filename)
+##     else:
+##         descriptions = {}
+##    
+##     with open(filename, "a") as outfile:
+##         with open(description_filename, "a") as description_file:
+##                 description_logger = DescriptionLogger(description_file, set(descriptions))
+##                 state = State(id, None, get_reporter(quiet=True),
+##                                       description_logger = description_logger)
+##                 
+##                 with tracer.using_state(state):
+##                     yield
+##                     
+##         write_features(outfile, id, state.features)
+
+def open_call_coverage(filename, trace_type="func-pairs", append=False):
+    tracer = get_tracer(trace_type)
+    
+    description_filename = filename + ".description"
+    if append and os.path.exists(description_filename):
+        seen = set(load_descriptions(description_filename))
+    else:
+        seen = set()
+
+    if append:
+        flag = "a"
+    else:
+        flag = "w"
+    outfile = open(filename, flag)
+    try:
+        description_file = open(description_filename, flag)
+    except:
+        outfile.close()
+        raise
+    description_logger = DescriptionLogger(description_file, seen)
+
+    return CallCoverage(outfile, description_file, description_logger, tracer)
+
+class CallCoverage:
+    def __init__(self, outfile, description_file, description_logger, tracer):
+        self.outfile = outfile
+        self.description_file = description_file
+        self.description_logger = description_logger
+        self.tracer = tracer
+
+    def close(self):
+        self.outfile.close()
+        self.description_file.close()
+
+    def __enter__(self):
+        return self
+    def __exit___(self, *args):
+        self.close()
+
+    def __del__(self):
+        self.close()
+        
+    @contextlib.contextmanager
+    def record(self, id):
+        state = State(id, None, get_reporter(quiet=True), description_logger = self.description_logger)
+        with self.tracer.using_state(state):
+            yield
+        write_features(self.outfile, id, state.features)
+        
 
 def add_trace_argument(parser):
     parser.add_argument(
@@ -392,10 +464,13 @@ def add_trace_argument(parser):
 #### Description logger
 
 class DescriptionLogger:
-    def __init__(self, outfile):
+    def __init__(self, outfile, seen=None):
         self.outfile = outfile
-        self._seen = set()
-        
+        if seen is None:
+            self._seen = set()
+        else:
+            self._seen = set(seen)
+    
     def add(self, feature, description):
         if feature not in self._seen:
             self._seen.add(feature)
@@ -410,6 +485,16 @@ def get_description_logger(parser, filename):
     except OSError as err:
         parser.error(f"Cannot open --description file: {err}")
     return DescriptionLogger(outfile)
+
+def load_descriptions(filename):
+    descriptions = {}
+    with open(filename) as infile:
+        for lineno, line in enumerate(infile, 1):
+            left, tab, right = line.rstrip("\n").partition("\t")
+            if tab != "\t":
+                raise AssertionError((filename, lineno, line))
+            descriptions[left] = right
+    return descriptions
 
 ####
 
