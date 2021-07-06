@@ -24,18 +24,18 @@
 
 ## Overview
 #
-# diverse_mols.py openeye dataset.{sdf,smi}
+# off_coverage.py openeye dataset.{sdf,smi}
 #   - use OpenEye's OEChem and OpenFF to identify features
-# diverse_mols.py rdkit dataset.{sdf,smi}
+# off_coverage.py rdkit dataset.{sdf,smi}
 #   - use RDKit and OpenFF to identify features
-# diverse_mols.py xcompare dataset.{sdf,smi} -o x.feats
+# off_coverage.py xcompare dataset.{sdf,smi} -o x.feats
 #   - cross-compare the OpenFF's RDKit and OEChem wrappers
-# diverse_mols.py merge x.feats y.feats -o z.feats
+# off_coverage.py merge x.feats y.feats -o z.feats
 #   - merge multiple datasets into one
-# diverse_mols.py z3_create x.feats -o x.smt
+# off_coverage.py z3_create x.feats -o x.smt
 #   - create an SMT-formatted input file for Z3
 #      Used as: z3 z.smt > x.out
-# diverse_mols.py z3_decode x.out
+# off_coverage.py z3_decode x.out
 #   - extract the model information from the Z3 output
 
 ## MIT LICENSE
@@ -1107,8 +1107,21 @@ def oe_parse_mol(record, record_format):
     if mol is not None:
         mol = oe_standarize_mol(mol)
     return mol
-            
-            
+
+# Don't process molecules with a "*" or R-group.
+# (This works for both OEChem and RDKit molecules!)
+class RealAtomFilterTool(FilterTool):
+    @staticmethod
+    def initialize(parser, args):
+        return RealAtomFilterTool()
+
+    def at_start(self, state):
+        for atom in state.mol.GetAtoms():
+            if atom.GetAtomicNum() == 0:
+                state.reporter.skip(state.id, f"contains atom with atomic num 0")
+                return True
+        return False
+    
 class OESingleComponentFilterTool(FilterTool):
     @staticmethod
     def add_arguments(parser):
@@ -1737,6 +1750,7 @@ subparsers = parser.add_subparsers()
 
 openeye_filter_tools = [
     SeenIdsFilterTool,
+    RealAtomFilterTool,
     OESingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -1932,6 +1946,18 @@ def rd_parse_mol(record, record_format):
     raise AssertionError(record_format)
     
 #### Filter tools
+
+class RDRealAtomFilterTool(FilterTool):
+    @staticmethod
+    def initialize(parser, args):
+        return RDRealAtomFilterTool()
+
+    def at_start(self, state):
+        for atom in state.mol.GetAtoms():
+            if atom.GetAtomicNum() == 0:
+                state.reporter.skip(state.id, f"contains atom with atomic num 0")
+                return True
+        return False
 
 class RDSingleComponentFilterTool(FilterTool):
     @staticmethod
@@ -2240,6 +2266,7 @@ class RDCircularFeatureTool(FeatureTool):
 
 rdkit_filter_tools = [
     SeenIdsFilterTool,
+    RealAtomFilterTool,
     RDSingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -2751,6 +2778,7 @@ class XCompareInChIFeatureTool(FeatureTool):
 xcompare_filter_tools = [
     # These are manually initialized
     SeenIdsFilterTool,
+    RealAtomFilterTool,
     OESingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -2796,6 +2824,7 @@ def xcompare_command(parser, args):
     capture_oe_warnings()
 
     seen_ids_filter = SeenIdsFilterTool.initialize(parser, args)
+    real_atoms_filter = RealAtomFilterTool.initialize(parser, args)
     component_filter = OESingleComponentFilterTool.initialize(parser, args)
     novel_filter = NovelFeaturesFilterTool.initialize(parser, args)
     
@@ -2845,6 +2874,8 @@ def xcompare_command(parser, args):
         if rdmol is not None and oemol is not None:
             oe_state = State(id, oemol, reporter, features = state.features,
                                  description_logger = description_logger)
+            if real_atoms_filter.at_start(oe_state):
+                continue
             if component_filter is not None and component_filter.at_start(oe_state):
                 continue
 
