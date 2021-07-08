@@ -1200,6 +1200,19 @@ class OEWarningFeatureTool(FeatureTool):
             elif "Warning: Internal CIP error" in msg:
                 # In CHEBI:51432
                 state.add_feature("oe_err_internal_cip_error", "OEChem warning: Internal CIP error")
+
+            elif "Invalid stereochemistry specified for atom" in msg:
+                # In CHEBI:73255
+                state.add_feature(
+                    "oe_err_invalid_atom_stereo_specified",
+                    "OEChem warning: invalid atom stereochemistry specified atom",
+                    )
+            elif "Invalid double bond stereomark ignored" in msg:
+                # DrugBank_5414 in MiniDrugBank.sdf
+                state.add_feature(
+                    "oe_err_invalid_double_bond_stereomark",
+                    "OEChem warning: invalid double bond stereomark",
+                    )
                 
             else:
                 raise AssertionError("Unknown OE warning:", msg)
@@ -1763,14 +1776,18 @@ def rd_parse_mol(record, record_format):
         file_obj = io.BytesIO(record)
         sdf_supplier = Chem.ForwardSDMolSupplier(
             file_obj, removeHs=False, sanitize=False, strictParsing=True)
-        with capture_stderr_rdkit() as msgs:
-            for rdmol, rd_topology in rd_wrapper._process_sdf_supplier(sdf_supplier, allow_undefined_stereo=False, _cls=None):
+        with capture_stderr_rdkit():
+            for rdmol, rd_topology in rd_wrapper._process_sdf_supplier(
+                    sdf_supplier, allow_undefined_stereo=False, _cls=None):
+                # Read a single record
                 break
             else:
+                # Nothing read
                 rdmol = rd_topology = None
                 
 
     elif record_format == "smi":
+        # Handle SMILES file parsing myself.
         smiles, title = record.split(None, 1)
         title = title.strip()
         with capture_stderr_rdkit() as msgs:
@@ -1787,7 +1804,6 @@ def rd_parse_mol(record, record_format):
     else:
         raise AssertionError(record_format)
     
-    rd_msg_handler.messages[:] = msgs
     return rdmol, rd_topology
 
     
@@ -1828,6 +1844,33 @@ class RDSingleComponentFilterTool(FilterTool):
             return True
         return False
 
+def rd_to_smiles(rd_wrapper, topology, state):
+    try:
+        with capture_stderr_rdkit():
+            return rd_wrapper.to_smiles(topology)
+    except AssertionError as err:
+        # CHEBI:57439
+        state.add_feature(
+            "xcmp_rd2rd_smi_assert_err",
+            "Assertion error converting RD topology to SMILES using RD wrapper")
+        state.reporter.unexpected_error(
+            state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
+        return None
+    except KeyError:
+        # CHEBI:73255, CHEBI:60153
+        state.add_feature(
+            "xcmp_rd2rd_smi_keyerror_err",
+            "Assertion error converting RD topology to SMILES using RD wrapper")
+        ## state.reporter.unexpected_error(
+        ##     state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
+        return None
+    except Chem.AtomValenceException as err:
+        # CHEBI:149672
+        state.add_feature(
+            "xcmp_rd2rd_smi_valence",
+            "AtomValenceException converting RD topology to SMILES using RD wrapper")
+        return
+    
 
 #### Feature tools
 
@@ -2531,21 +2574,13 @@ class XCompareSmilesFeatureTool(FeatureTool):
         if oe_topology is None or rd_topology is None:
             return
 
-        with capture_stderr_rdkit():
-            oe_smi = self.oe_wrapper.to_smiles(oe_topology)
+        oe_smi = self.oe_wrapper.to_smiles(oe_topology)
             
         state.add_feature("xcmp_oe2oe_smi_ok", "Can convert OE topology to SMILES using OE wrapper")
 
-        try:
-            rd_smi = self.rd_wrapper.to_smiles(rd_topology)
-        except AssertionError as err:
-            state.add_feature(
-                "xcmp_rd2rd_smi_assert_err",
-                "Assertion error converting RD topology to SMILES using RD wrapper")
-            state.reporter.unexpected_error(
-                state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
-            return
-        
+        rd_smi = rd_to_smiles(self.rd_wrapper, rd_topology, state)
+        if rd_smi is None:
+            return        
         
         state.add_feature("xcmp_rd2rd_smi_ok", "Can convert RD topology to SMILES using RD wrapper")
         
