@@ -288,8 +288,6 @@ class ToolkitTracer:
                 can_trace = self._can_trace[module_name] = True
             else:
                 # check for prefix names
-                ## with open("/dev/ttys005", "w") as f:
-                ##     print(module_name, file=f)
                 for name in self.module_names:
                     if name[-1:] == "." and module_name.startswith(name):
                         can_trace = self._can_trace[module_name] = True
@@ -364,7 +362,7 @@ _trace_options = {
     "mod-pairs": (PerModuleTracer, TraceLinePairs),
     }
 
-_trace_options["on"] = _trace_options["mod-cover"]
+_trace_options["on"] = _trace_options["func-pairs"]
     
 def get_tracer(trace_type=None):
     module_names = set(["openff.", "toolkit.tests."])
@@ -377,28 +375,6 @@ def get_tracer(trace_type=None):
         raise ValueError("unknown trace type")
 
     return ToolkitTracer(module_names, module_tracer_class, function_tracer_class)
-
-# Experimental. Has quadradic behaviour.
-## @contextlib.contextmanager
-## def one_shot(filename, id, trace_type="mod-pairs"):
-##     tracer = get_tracer(trace_type)
-## 
-##     description_filename = filename + ".description"
-##     if os.path.exists(description_filename):
-##         descriptions = load_descriptions(description_filename)
-##     else:
-##         descriptions = {}
-##    
-##     with open(filename, "a") as outfile:
-##         with open(description_filename, "a") as description_file:
-##                 description_logger = DescriptionLogger(description_file, set(descriptions))
-##                 state = State(id, None, get_reporter(quiet=True),
-##                                       description_logger = description_logger)
-##                 
-##                 with tracer.using_state(state):
-##                     yield
-##                     
-##         write_features(outfile, id, state.features)
 
 def open_call_coverage(filename, trace_type="func-pairs", append=False):
     tracer = get_tracer(trace_type)
@@ -474,7 +450,7 @@ class DescriptionLogger:
         else:
             self._seen = set(seen)
     
-    def add(self, feature, description):
+    def add(self, feature, description=None):
         if feature not in self._seen:
             self._seen.add(feature)
             self.outfile.write(f"{feature}\t{description}\n")
@@ -821,6 +797,14 @@ def capture_stderr():
         if s:
             msgs.extend(s.splitlines())
 
+@contextlib.contextmanager
+def capture_stderr_rdkit():
+    # Deliberatly not clearing to allow multiple captures
+    with capture_stderr() as msgs:
+        yield msgs
+    rd_msg_handler.messages[:] = msgs
+    
+
 def add_id_tag_argument(p):
     p.add_argument(
         "--id-tag", 
@@ -885,23 +869,33 @@ class FilterTool:
     def at_start(self, state):
         return False
 
+    def at_mol_start(self, state):
+        return False
+
     def at_end(self, state):
         return False
 
 class State:
-    def __init__(self, id, mol, reporter, features=None, description_logger=None, cache=None):
+    def __init__(self, id, record, reporter,
+                     rdmol = None, rd_topology = None,
+                     oemol = None, oe_topology = None,
+                     features = None, description_logger = None):
         self.id = id
-        self.mol = mol
+        self.record = record
         self.reporter = reporter
+        self.rdmol = rdmol
+        self.rd_topology = rd_topology
+        self.oemol = oemol
+        self.oe_topology = oe_topology
         if features is None:
             features = set()
         self.features = features
         self.description_logger = description_logger
-        if cache is None:
-            cache = {}
-        self.cache = cache
+
 
     def add_feature(self, feature, description=None):
+        if description is None and "=" not in feature:
+            raise AssertionError("Missing description", feature)
         self.features.add(feature)
         if description is not None and self.description_logger is not None:
             self.description_logger.add(feature, description)
@@ -997,18 +991,21 @@ class NovelFeaturesFilterTool(FilterTool):
             "--novel-count",
             metavar = "N",
             type = int,
-            default = 1,
+            default = None,
             help = "allow up to N occurences of a given feature (default: 1)",
             )
             
     @staticmethod
     def initialize(parser, args):
-        if not args.novel:
-            return None
-
         count = args.novel_count
-        if count < 1:
-            parser.error("--novel-count must be a positive integer")
+        # Don't use unless --novel is set or --novel-count is used.
+        if count is None:
+            if not args.novel:
+                return None
+            count = 1 # use the default of 1
+        else:
+            if count < 1:
+                parser.error("--novel-count must be a positive integer")
         return NovelFeaturesFilterTool(count)
     
     def __init__(self, max_count):
@@ -1057,92 +1054,84 @@ def capture_oe_warnings():
     oe_msg_handler = CaptureOEErrorHandler()
     OEThrow.SetHandlerImpl(oe_msg_handler, False)
 
-def oe_standarize_mol(mol):
-    if not oechem.OEAddExplicitHydrogens(mol):
-        if oe_msg_handler is not None:
-            oe_msg_handler.messages.append(
-                "WARNING: Unable to add explicit hydrogens"
-                )
-    oechem.OEAssignAromaticFlags(mol, oechem.OEAroModel_MDL)
-    oechem.OEPerceiveChiral(mol)
-    return mol
+
+# Adapter to use OpenFF's OpenEyeToolkitWrapper to read a record.
+# Normally we could use from_file_obj() but I want access to
+# the oemol and the OpenFF Molecule because currently the OpenFF
+# reader doesn't reject multi-fragment and atomic number 0 atoms.
+
+# This digs into internal implementation details and will likely break
+# in the future.
+
+# This works by replacing from_openeye() with a function that calls
+# the parent from_openeye() and returns (oemol, openff_molecule).
+# This doesn't quite work, because the internal code may set
+# openff_mol.partial_charges = None. This won't work with the
+# returned 2-element tuple, so forward that setattr.
     
-def iter_ids_and_oegraphmols(ifs, id_tag):
-    from openeye import OEGetSDData
-
-    if oe_msg_handler is not None:
-        oe_msg_handler.Clear()
-    for molno, mol in enumerate(ifs.GetOEGraphMols(), 1):
-        if id_tag is not None:
-            id = OEGetSDData(mol, id_tag)
-            if not id:
-                id = mol.GetTitle()
-        else:
-            id = mol.GetTitle()
-        if not id:
-            if id_tag is None:
-                die(f"Missing identifier from record #{molno}")
-            else:
-                die(f"Missing identifier from record #{molno} with id_tag {id_tag!r}")
-        mol = oe_standarize_mol(mol)
-        yield id, mol
-        if oe_msg_handler is not None:
-            oe_msg_handler.Clear()
-
 class SpecialOEMol(namedtuple("SpecialOEMol", "oemol oe_topology")):
     def _set_partial_charges(self, value):
-        self.oemol.partial_charges = value
+        self.oe_topology.partial_charges = value
     partial_charges = property(None, _set_partial_charges)
-            
+
+# Use a helper function to create and instantiate the derived class.
+# It's in a function so some functionality can work even if OpenFF
+# and/or OEChem are not installed.
 _special_oe_wrapper = None
 def get_special_oe_wrapper():
     global _special_oe_wrapper
     if _special_oe_wrapper is None:
+        # Define and instantiate the singleton.
         from openff.toolkit.utils import OpenEyeToolkitWrapper
         from openeye import oechem
     
         class SpecialOpenEyeToolkitWrapper(OpenEyeToolkitWrapper):
+            # OpenFF calls from_openeye() after it processed the OEMol
             def from_openeye(self, oemol, allow_undefined_stereo, _cls):
                 oe_topology = super().from_openeye(oemol, allow_undefined_stereo, _cls)
                 # There seems to be a reference count bug in OEChem where the oemol
                 # is deleted at the C++ level even though the Python one exists.
                 # Make a copy instead.
+                # Need 'SpecialOEMol' so `mol.partial_charges = None` works
                 return SpecialOEMol(oechem.OEGraphMol(oemol), oe_topology)
         _special_oe_wrapper = SpecialOpenEyeToolkitWrapper()
+    
     return _special_oe_wrapper
             
 def oe_parse_mol(record, record_format):
     oe_wrapper = get_special_oe_wrapper()
     
     if record_format == "sdf":
-        fmt = oechem.OEFormat_SDF
+        oeformat = oechem.OEFormat_SDF
     elif record_format == "smi":
-        fmt = oechem.OEFormat_SMI
+        oeformat = oechem.OEFormat_SMI
     else:
         raise AssertionError(record_format)
     
     if oe_msg_handler is not None:
         oe_msg_handler.Clear()
-        
+
+    # Set up the molistream
     ifs = oechem.oemolistream()
-    ifs.SetFormat(fmt)
+    ifs.SetFormat(oeformat)
     assert ifs.openstring(record)
 
+    # Call into the OpenFF internals to iterate over SpecialOEMol:s
     for oemol, oe_topology in oe_wrapper._read_oemolistream_molecules(ifs, allow_undefined_stereo=False, _cls=None):
         break
     else:
         oemol = oe_topology = None
     return oemol, oe_topology
 
+
 # Don't process molecules with a "*" or R-group.
-# (This works for both OEChem and RDKit molecules!)
-class RealAtomFilterTool(FilterTool):
+class OERealAtomFilterTool(FilterTool):
     @staticmethod
     def initialize(parser, args):
-        return RealAtomFilterTool()
+        return OERealAtomFilterTool()
 
-    def at_start(self, state):
-        for atom in state.mol.GetAtoms():
+    def at_mol_start(self, state):
+        for atom in state.oemol.GetAtoms():
             if atom.GetAtomicNum() == 0:
                 state.reporter.skip(state.id, f"contains atom with atomic num 0")
                 return True
@@ -1166,8 +1155,8 @@ class OESingleComponentFilterTool(FilterTool):
         from openeye.oechem import OEDetermineComponents
         self.OEDetermineComponents = OEDetermineComponents
         
-    def at_start(self, state):
-        num_components, components = self.OEDetermineComponents(state.mol)
+    def at_mol_start(self, state):
+        num_components, components = self.OEDetermineComponents(state.oemol)
         if num_components != 1:
             state.reporter.skip(state.id, f"number of components = {num_components}")
             return True
@@ -1196,22 +1185,29 @@ class OEWarningFeatureTool(FeatureTool):
         num_bad_stereo = 0
         for msg in oe_msg_handler.messages:
             if "Unsupported Sgroup information ignored" in msg:
-                state.add_feature("oe_warn_Sgroup")
+                state.add_feature("oe_err_Sgroup", "OEChem warning: Unsupported Sgroup information ignored")
             elif "Stereochemistry corrected on atom" in msg:
                 num_bad_stereo += 1
-                state.add_feature("oe_warn_AS")
+                state.add_feature("oe_err_AS", "OEChem warning: Stereochemistry corrected on atom")
             elif "Unable to add explicit hydrogens" in msg:
-                state.add_feature("oe_warn_AddHs")
+                state.add_feature("oe_err_AddHs", "OEChem warning: Unable to add explicit hydrogens")
             elif "Problem parsing SMILES" in msg:
-                state.add_feature("oe_err_smi")
+                state.add_feature("oe_err_smi", "OEChem warning: Problem parsing SMILES")
                 break
-            elif "Problem parsing SMILES" in msg:
-                raise AssertionError("OE", msg)
+            elif "OE3DToAtomStereo is unable to perceive atom stereo from a flat geometry" in msg:
+                state.add_feature("oe_err_flat_stereo", "OEChem warning: unable to perceive atom stereo from a flat geometry")
+
+            elif "Warning: Internal CIP error" in msg:
+                # In CHEBI:51432
+                state.add_feature("oe_err_internal_cip_error", "OEChem warning: Internal CIP error")
+                
+            else:
+                raise AssertionError("Unknown OE warning:", msg)
 
         if 2 <= num_bad_stereo <= 5:
-            state.add_feature("oe_warn_AS_2_5")
+            state.add_feature("oe_err_AS_2_5", "OEChem warning: between 2 and 5 atom stereochemistry warnings")
         if 6 <= num_bad_stereo:
-            state.add_feature("oe_warn_AS_6_")
+            state.add_feature("oe_err_AS_6_", "OEChem warning: 6 or more atom stereochemistry warnings")
     
 class OEAtomCountFeatureTool(FeatureTool):
     @staticmethod
@@ -1237,116 +1233,8 @@ class OEAtomCountFeatureTool(FeatureTool):
         return OEAtomCountFeatureTool()
 
     def add_features(self, state):
-        num_atoms = state.mol.NumAtoms()
+        num_atoms = state.oe_topology.n_atoms
         state.add_feature(f"oe_natoms={num_atoms}")
-
-            
-## class OEUnspecifiedChiralAtomsFeatureTool(FeatureTool):
-##     @staticmethod
-##     def add_arguments(parser):
-##         add_default_feature_argument(
-##             parser,
-##             "--unspecified-chiral-atoms",
-##             action = "store_true",
-##             help = "Unspecified chiral atoms feature tool",
-##             )
-
-##     @staticmethod
-##     def initialize(parser, args):
-##         if args.unspecified_chiral_atoms:
-##             return OEUnspecifiedChiralAtomsFeatureTool()
-##         return None
-
-##     def add_features(self, id, mol, features):
-##         unspec_chirals = [a for a in mol.GetAtoms()
-##                               if a.IsChiral() and not a.HasStereoSpecified()]
-##         features.add("oe_uCA")
-##         if 2 <= len(unspec_chirals) <= 4:
-##             features.add("oe_uCA_2_4")
-##         elif 5 <= len(unspec_chirals) <= 10:
-##             features.add("oe_uCA_5_10")
-##         elif 11 <= len(unspec_chirals):
-##             features.add("oe_uCA_11_")
-
-##         ring_chirals = [a for a in unspec_chirals if a.IsInRing()]
-##         if ring_chirals:
-##             features.add("oe_urCA")
-##             if 2 <= len(ring_chirals) <= 3:
-##                 features.add("oe_urCA_2_3")
-##             if 4 <= len(ring_chirals):
-##                 features.add("oe_urCA_4")
-
-## class OESpecifiedChiralAtomsFeatureTool(FeatureTool):
-##     @staticmethod
-##     def add_arguments(parser):
-##         add_default_feature_argument(
-##             parser,
-##             "--specified-chiral-atoms",
-##             action = "store_true",
-##             help = "Specified chiral atoms feature tool",
-##             )
-        
-##     @staticmethod
-##     def initialize(parser, args):
-##         if args.specified_chiral_atoms:
-##             return OESpecifiedChiralAtomsFeatureTool()
-##         return None
-
-##     def add_features(self, id, mol, features):
-##         chiral_atoms = [a for a in mol.GetAtoms()
-##                             if a.IsChiral() and a.HasStereoSpecified()]
-##         if chiral_atoms:
-##             features.add("oe_CA")
-##             if 2 <= len(chiral_atoms) <= 4:
-##                 features.add("oe_CA_2_4")
-##             elif 5 <= len(chiral_atoms) <= 10:
-##                 features.add("oe_CA_5_10")
-##             elif 11 <= len(chiral_atoms):
-##                 features.add("oe_CA_11_")
-
-##             ring_chirals = [a for a in chiral_atoms if a.IsInRing()]
-##             if ring_chirals:
-##                 features.add("oe_RCA")
-##                 if 2 <= len(ring_chirals) <= 3:
-##                     features.add("oe_RCA_2_3")
-##                 if 4 <= len(ring_chirals):
-##                     features.add("oe_RCA_4")
-        
-
-## class OEUnspecifiedChiralBondsFeatureTool(FeatureTool):
-##     @staticmethod
-##     def add_arguments(parser):
-##         add_default_feature_argument(
-##             parser,
-##             "--unspecified-chiral-bonds",
-##             action = "store_true",
-##             help = "Unspecified chiral bonds feature tool",
-##             )
-
-##     @staticmethod
-##     def initialize(parser, args):
-##         if args.unspecified_chiral_bonds:
-##             return cls()
-##         return None
-
-##     def add_features(self, id, mol, features):
-##         # From openff-toolkit/openff/toolkit/utils/toolkits.py
-##         unspec_db = [b for b in mol.GetBonds()
-##                          if b.IsChiral() and not b.HasStereoSpecified()]
-
-##         if unspec_db:
-##             features.add("oe_uCB")
-##             if 2 <= len(unspec_db) <= 4:
-##                 features.add("oe_uCB_2_4")
-##             if 5 <= len(unspec_db) <= 8:
-##                 features.add("oe_uCB_5_8")
-##             if 9 <= len(unspec_db):
-##                 features.add("oe_uCB_9_")
-
-def oe_get_cached_topology(wrapper, state):
-    if "oe_topology" not in state.cache:
-        state.cache["oe_topology"] = oe_get_topology(wrapper, state)
-    return state.cache["oe_topology"]
 
 def handle_openeye_exception(err, state):
     from openff.toolkit.utils import UndefinedStereochemistryError
@@ -1357,7 +1245,7 @@ def handle_openeye_exception(err, state):
                 continue
             
             if "Problematic atoms" in line:
-                state.add_feature("oe_off_undef_stereo_atom")
+                state.add_feature("oe_off_undef_stereo_atom", "OpenEyeToolkitWrapper: undefined atom stereochemistry")
                 continue
             if line.startswith("Atom atomic num:"):
                 continue
@@ -1365,53 +1253,15 @@ def handle_openeye_exception(err, state):
                 continue
 
             if "Problematic bonds are:" in line:
-                state.add_feature("oe_off_undef_stereo_bond")
+                state.add_feature("oe_off_undef_stereo_bond", "OpenEyeToolkitWrapper: undefined bond stereochemistry")
                 continue
 
-            raise AssertionError(line) # Don't know what this is.
+            raise AssertionError("Unsupported UndefinedStereochemistryError message", line) # Don't know what this is.
             
         return True
     
     return False
     
-
-def oe_get_topology(wrapper, state):
-    from openff.toolkit.utils import UndefinedStereochemistryError
-
-    mol = state.mol
-    features = state.features
-
-    #with capture_stderr() as msgs:
-    try:
-        obj = wrapper.from_object(mol, allow_undefined_stereo=False)
-    except UndefinedStereochemistryError as err:
-        return None
-
-    features.add("oe_openff_good")
-    return obj
-
-class OEOpenFFFeatureTool(FeatureTool):
-    @staticmethod
-    def add_arguments(parser):
-        add_default_feature_argument(
-            parser,
-            "--openff",
-            action = "store_true",
-            help = "convert the molecule to an OpenFF Molecule and record problems",
-            )
-
-    @staticmethod
-    def initialize(parser, args):
-        if not args.openff:
-            return None
-        return OEOpenFFFeatureTool()
-
-    def __init__(self):
-        from openff.toolkit.utils import OpenEyeToolkitWrapper
-        self._wrapper = OpenEyeToolkitWrapper()
-
-    def add_features(self, state):
-        oe_get_cached_topology(self._wrapper, state)
 
             
 class OEPatternDefs:
@@ -1421,7 +1271,7 @@ class OEPatternDefs:
         self.matchers = matchers
 
     def add_features(self, state):
-        id, mol = state.id, state.mol
+        id, mol = state.id, state.oemol
 
         saved_isotopes = None
         
@@ -1442,13 +1292,13 @@ class OEPatternDefs:
         try:
             for (lineno, feature_name, feature_expr, code) in self.pattern_defs.features:
                 if eval(code, None, counts):
-                    state.add_feature(prefix + feature_name)
+                    state.add_feature(prefix + feature_name, f"Match pattern {prefix}{feature_name}")
         except ZeroDivisionError as err:
             state.reporter.unexpected_error(
                 id,
                 f"ZeroDivisionError in {feature_name!r}: {feature_expr!r}",
                 )
-            state.add_feature(prefix + f"divide_by_zero_{feature_name}")
+            state.add_feature(prefix + f"divide_by_zero_{feature_name}", f"Match pattern {prefix}{feature_name} failed")
 
         if saved_isotopes is not None:
             for atom, isotope in saved_isotopes:
@@ -1748,7 +1598,7 @@ class OECircularFeatureTool(FeatureTool):
         features = state.features
         
         for r in self._radii:
-            OEMakeCircularFP(fp, state.mol, 8192, r, r, atom_flags, bond_flags)
+            OEMakeCircularFP(fp, state.oemol, 8192, r, r, atom_flags, bond_flags)
             bits = _get_oefp_bits(fp)
             features.update(f"oe_CR{r}_{i}" for i in bits)
         
@@ -1770,7 +1620,7 @@ subparsers = parser.add_subparsers()
 
 openeye_filter_tools = [
     SeenIdsFilterTool,
-    RealAtomFilterTool,
+    OERealAtomFilterTool,
     OESingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -1778,7 +1628,6 @@ openeye_filter_tools = [
 openeye_feature_tools = [
     OEWarningFeatureTool,
     OEAtomCountFeatureTool,
-    OEOpenFFFeatureTool,
     ## OEUnspecifiedChiralAtomsFeatureTool,
     ## OESpecifiedChiralAtomsFeatureTool,
     ## OEUnspecifiedChiralBondsFeatureTool,
@@ -1811,10 +1660,13 @@ add_filename_argument(openeye_parser)
 def openeye_command(parser, args):
     from openeye.oechem import OEGetSDData, oemolistream
     
-    ifs = oemolistream(args.filename)
-
-    if not ifs.IsValid():
-        die(f"Cannot open input file {args.filename!r}")
+    try:
+        reader = read_ids_and_records(
+            args.filename,
+            id_tag = args.id_tag,
+            )
+    except OSError as err:
+        die(f"Cannot open input file: {err}")
 
     filter_tools = []
     for config in openeye_filter_tools:
@@ -1834,19 +1686,32 @@ def openeye_command(parser, args):
     
     tracer = get_tracer(args.trace)
     description_logger = get_description_logger(parser, args.description)
-    
-    for id, mol in iter_ids_and_oegraphmols(ifs, args.id_tag):
-        state = State(id, mol, reporter,
-                          description_logger = description_logger)
+
+    for id, record in reader:
+        state = State(id, record, reporter, description_logger = description_logger)
         
+        try:
+            with tracer.using_state(state):
+                oemol, oe_topology = oe_parse_mol(record.record, record.record_format)
+        except Exception as err:
+            if not handle_openeye_exception(err, state):
+                raise
+            oemol = oe_topology = None
+            state.add_feature("oe_parse_err", "OpenEyeToolkitWrapper could not parse the record")
+        else:
+            state.add_feature("oe_parse_ok", "OpenEyeToolkitWrapper could parse the record")
+
         if any(filter_tool.at_start(state) for filter_tool in filter_tools):
             continue
-        
-        state.add_feature("oe_parse") # OEChem can parse it
 
-        for feature_tool in feature_tools:
-            with tracer.using_state(state):
-                feature_tool.add_features(state)
+        if oemol is not None:
+            state.oemol, state.oe_topology = oemol, oe_topology
+            if any(filter_tool.at_mol_start(state) for filter_tool in filter_tools):
+                continue
+
+            for feature_tool in feature_tools:
+                with tracer.using_state(state):
+                    feature_tool.add_features(state)
 
         if any(filter_tool.at_end(state) for filter_tool in filter_tools):
             continue
@@ -1877,67 +1742,6 @@ def capture_rd_warnings():
     # then capture Python's stderr
     Chem.WrapLogs()
 
-def rd_standardize_mol(mol):
-    return Chem.AddHs(mol)
-
-def _iter_rdkit_sdf(f, id_tag):
-    if id_tag is None:
-        id_tag = "_Name"
-    suppl = Chem.ForwardSDMolSupplier(f)
-    try:
-        while 1:
-            with capture_stderr() as msgs:
-                mol = next(suppl)
-            if mol is None:
-                # We can't do anothing with this one because there's
-                # no way to get access to the id.
-                continue
-            mol = rd_standardize_mol(mol)
-            rd_msg_handler.messages[:] = msgs
-            id = mol.GetProp(id_tag)
-            yield id, mol
-
-    except StopIteration:
-        pass
-    finally:
-        f.close()
-        
-def _iter_rdkit_smiles(f):
-    from rdkit import Chem
-    try:
-        for lineno, line in enumerate(f):
-            try:
-                smiles, id = line.split(None, 1)
-            except ValueError:
-                die(f"SMILES file line {lineno} not formatted as <SMILES> <whitespace> <id>")
-            with capture_stderr() as msgs:
-                mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                mol = rd_standardize_mol(mol)
-            rd_msg_handler.messages[:] = msgs
-            yield (id.strip(b"\n").decode("utf8"), mol)
-    except StopIteration:
-        pass
-    finally:
-        f.close()
-
-def iter_rdkit_ids_and_mols(filename, id_tag):
-    s = filename.lower()
-    
-    f = None
-    if s.endswith(".sdf.gz"):
-        f = gzip.open(filename, "rb")
-        return _iter_rdkit_sdf(f, id_tag)
-    elif s.endswith(".sdf"):
-        f = open(filename, "rb")
-        return _iter_rdkit_sdf(f, id_tag)
-        
-    if s.endswith(".gz"):
-        f = gzip.open(filename, "rb")
-        return _iter_rdkit_smiles(f)
-    else:
-        f = open(filename, "rb")
-        return _iter_rdkit_smiles(f)
 
 _special_rd_wrapper = None
 def get_special_rd_wrapper():
@@ -1959,7 +1763,7 @@ def rd_parse_mol(record, record_format):
         file_obj = io.BytesIO(record)
         sdf_supplier = Chem.ForwardSDMolSupplier(
             file_obj, removeHs=False, sanitize=False, strictParsing=True)
-        with capture_stderr() as msgs:
+        with capture_stderr_rdkit() as msgs:
             for rdmol, rd_topology in rd_wrapper._process_sdf_supplier(sdf_supplier, allow_undefined_stereo=False, _cls=None):
                 break
             else:
@@ -1969,7 +1773,7 @@ def rd_parse_mol(record, record_format):
     elif record_format == "smi":
         smiles, title = record.split(None, 1)
         title = title.strip()
-        with capture_stderr() as msgs:
+        with capture_stderr_rdkit() as msgs:
             try:
                 rdmol, rd_topology = rd_wrapper.from_smiles(smiles)
             except Exception as err:
@@ -1979,8 +1783,6 @@ def rd_parse_mol(record, record_format):
                     rdmol = rd_topology = None
                 else:
                     raise
-
-        rd_msg_handler.messages[:] = msgs
 
     else:
         raise AssertionError(record_format)
@@ -1996,13 +1798,14 @@ class RDRealAtomFilterTool(FilterTool):
     def initialize(parser, args):
         return RDRealAtomFilterTool()
 
-    def at_start(self, state):
-        for atom in state.mol.GetAtoms():
+    def at_mol_start(self, state):
+        for atom in state.rdmol.GetAtoms():
             if atom.GetAtomicNum() == 0:
                 state.reporter.skip(state.id, f"contains atom with atomic num 0")
                 return True
         return False
 
+    
 class RDSingleComponentFilterTool(FilterTool):
     @staticmethod
     def add_arguments(parser):
@@ -2014,11 +1817,11 @@ class RDSingleComponentFilterTool(FilterTool):
             return None
         return RDSingleComponentFilterTool()
 
-    def at_start(self, state):
-        if state.mol is None:
+    def at_mol_start(self, state):
+        if state.rdmol is None:
             state.reporter.skip(state.id, "could not parse")
             return True
-        components = Chem.GetMolFrags(state.mol)
+        components = Chem.GetMolFrags(state.rdmol)
         num_components = len(components)
         if num_components != 1:
             state.reporter.skip(state.id, f"number of components = {num_components}")
@@ -2043,11 +1846,11 @@ class RDWarningFeatureTool(FeatureTool):
     def add_features(self, state):
         for msg in rd_msg_handler.messages:
             if "not removing hydrogen atom without neighbors" in msg:
-                state.add_feature("rd_warn_FreeH")
+                state.add_feature("rd_warn_FreeH", "RDKit warning: not removing hydrogen atom without neighbors")
             elif "not removing hydrogen atom with dummy atom neighbors" in msg:
-                state.add_feature("rd_warn_DummyH")
+                state.add_feature("rd_warn_DummyH", "RDKit warning: not removing hydrogen atom with dummy atom neighbors")
             elif "Warning: molecule is tagged as 3D, but all Z coords are zero" in msg:
-                state.add_feature("rd_err_3D_zero")
+                state.add_feature("rd_err_3D_zero", "RDKit warning: molecule is tagged as 3d, but all Z coords are zero")
             elif "Explicit valence for atom" in msg:
                 ## # Explicit valence for atom # 12 N, 4, is greater than permitted
                 ## terms = msg.split()
@@ -2055,18 +1858,18 @@ class RDWarningFeatureTool(FeatureTool):
                 ## # Make something like "N4"
                 ## atom_valence = terms[i+2].rstrip(",") + terms[i+3].rstrip(",")
                 ## state.add_feature(f"rd_err_valence_{atom_valence}")
-                state.add_feature(f"rd_err_valence")
+                state.add_feature(f"rd_err_valence", "RDKit warning: explicit valence for atom is greater than permitted")
             elif "Can't kekulize mol" in msg:
                 # Can't kekulize mol.  Unkekulized atoms: 1 3 5 7 8
-                state.add_feature("rd_err_kekulize")
+                state.add_feature("rd_err_kekulize", "RDKit warning: could not kekulize molecule")
             elif "Could not sanitize molecule ending" in msg:
-                state.add_feature("rd_err_sanitize")
+                state.add_feature("rd_err_sanitize", "RDKit warning: could not sanitize molecule")
 
             elif ("has specified valence" in msg and
                       "smaller than the drawn valence" in msg):
-                state.add_feature("rd_err_drawn_valence_mismatch")
+                state.add_feature("rd_err_drawn_valence_mismatch", "RDKit warning: specified valence is smaller than the drawn valence")
             elif ("Unrecognized radical value" in msg):
-                state.add_feature("rd_err_unrecognized_radical")
+                state.add_feature("rd_err_unrecognized_radical", "RDKit warning: unrecognized radical value")
             elif (
                     msg == 'RDKit ERROR: ' or
                     msg == 'RDKit ERROR: ****' or
@@ -2074,12 +1877,12 @@ class RDWarningFeatureTool(FeatureTool):
                     (msg.startswith('RDKit ERROR: [') # 'RDKit ERROR: [15:33:25] '
                          and msg.endswith('] '))
                       ):
-                state.add_feature("rd_err")
+                state.add_feature("rd_err", "RDKit error occurred")
             elif (
                     "RDKit ERROR: Post-condition Violation" in msg or
                     "moving to the beginning of the next molecule" in msg
                     ):
-                state.add_feature("rd_err")
+                state.add_feature("rd_err", "RDKit error occurred")
                 break
 
             elif (
@@ -2096,8 +1899,15 @@ class RDWarningFeatureTool(FeatureTool):
             elif (
                     "Unable to parse the SMILES string" in msg or
                     "SMILES Parse Error" in msg):
-                state.add_feature("rd_parse_err")
+                state.add_feature("rd_smiles_parse_err", "RDKit error: unable to parse the SMILES string")
             elif (msg == ""):
+                pass
+            elif "Conflicting single bond directions around double bond" in msg:
+                state.add_feature(
+                    "rd_err_conflicting_dirs",
+                    "RDKit warning: conflicting single bond directions around double bond",
+                    )
+            elif "BondStereo set to STEREONONE and single bond directions" in msg:
                 pass
             else:
                 raise AssertionError("What is this error?", msg)
@@ -2116,7 +1926,7 @@ class RDAtomCountFeatureTool(FeatureTool):
         return RDAtomCountFeatureTool()
 
     def add_features(self, state):
-        num_atoms = state.mol.GetNumAtoms(onlyExplicit=False)
+        num_atoms = state.rd_topology.n_atoms
         state.add_feature(f"rd_natoms={num_atoms}")
     
         
@@ -2129,11 +1939,6 @@ class RDAtomCountFeatureTool(FeatureTool):
 ## class RDUnspecifiedChiralBondsFeatureTool(FeatureTool):
 ##     pass
 
-def rd_get_cached_topology(wrapper, state):
-    if "rd_topology" not in state.cache:
-        state.cache["rd_topology"] = rd_get_topology(wrapper, state)
-    return state.cache["rd_topology"]
-
 def handle_rdkit_exception(err, state):
     from openff.toolkit.utils import UndefinedStereochemistryError
     
@@ -2144,13 +1949,13 @@ def handle_rdkit_exception(err, state):
             if "Bonds with undefined stereochemistry are" in line:
                 continue
             if "- Bond" in line and "(atoms " in line:
-                state.add_feature("rd_off_undef_stereo_bond")
+                state.add_feature("rd_off_undef_stereo_bond", "RDKitToolkitWrapper: undefined bond stereochemistry")
                 ## terms = line.split()
                 ## s = terms[-1].replace("-","_").strip("()")
                 ## state.add_feature(f"rd_uBS_{s}")
                 continue
             if "- Atom" in line and "(index" in line:
-                state.add_feature("rd_off_undef_stereo_atom")
+                state.add_feature("rd_off_undef_stereo_atom", "RDKitToolkitWrapper: undefined atom stereochemistry")
                 ## terms = line.split()
                 ## s = terms[2]
                 ## state.add_feature(f"rd_uAS_{s}")
@@ -2162,7 +1967,7 @@ def handle_rdkit_exception(err, state):
     if isinstance(err, Chem.AtomValenceException):
         # rdkit.Chem.rdchem.AtomValenceException:
         #   Explicit valence for atom # 0 Ge, 6, is greater than permitted
-        state.add_feature("rd_off_rd_valence")
+        state.add_feature("rd_off_rd_valence", "RDKit error: explicit atom valence is greater than permitted")
         ## msg = str(err)
         ## terms = msg.split()
         ## i = terms.index("#")
@@ -2172,42 +1977,6 @@ def handle_rdkit_exception(err, state):
         
     return False
     
-def rd_get_topology(wrapper, state):
-    mol = state.mol
-    features = state.features
-
-    #with capture_stderr() as msgs:
-    try:
-        obj = wrapper.from_object(mol, allow_undefined_stereo=False)
-    except Exception as err:
-        if handle_rdkit_exception(err, state):
-            return None
-        raise
-    
-    features.add("rd_openff_good")
-    return obj
-
-class RDOpenFFFeatureTool(FeatureTool):
-    @staticmethod
-    def add_arguments(parser):
-        OEOpenFFFeatureTool.add_arguments(parser)
-
-    @staticmethod
-    def initialize(parser, args):
-        if not args.openff:
-            return None
-        return RDOpenFFFeatureTool()
-
-    def __init__(self):
-        from openff.toolkit.utils import (
-            MessageException,
-            RDKitToolkitWrapper,
-            UndefinedStereochemistryError,
-        )
-        self._wrapper = RDKitToolkitWrapper()
-
-    def add_features(self, state):
-        rd_get_cached_topology(self._wrapper, state)
 
 
 # Work-in-progress
@@ -2240,10 +2009,10 @@ class RDPatternDefs:
         try:
             for (lineno, feature_name, feature_expr, code) in self.pattern_defs.features:
                 if eval(code, None, counts):
-                    state.add_feature(prefix + feature_name)
+                    state.add_feature(prefix + feature_name, f"Match pattern {prefix}{feature_name}")
         except ZeroDivisionError:
             sys.stderr.write(f"Divide by zero error in {id!r} - {code!r}\n")
-            state.add_feature(prefix + "divide_by_zero")
+            state.add_feature(prefix + "divide_by_zero", f"Match pattern {prefix}{feature_name} failed")
 
 
 def compile_rd_pattern_defs(pattern_defs, prefix=None):
@@ -2313,11 +2082,11 @@ class RDCircularFeatureTool(FeatureTool):
         self.GetMorganFingerprint = GetMorganFingerprint
 
     def add_features(self, state):
-        mol = state.mol
+        mol = state.rdmol
         features = state.features
         fp = self.GetMorganFingerprint(mol, radius = self.radius)
         for k, v in fp.GetNonzeroElements().items():
-            state.add_feature(f"rd_M_{k}") # ignoring count
+            state.add_feature(f"rd_M_{k}", f"RDKit Morgan fingerprint, r=2, bit {k}") # ignoring count
     
 
             
@@ -2325,7 +2094,7 @@ class RDCircularFeatureTool(FeatureTool):
 
 rdkit_filter_tools = [
     SeenIdsFilterTool,
-    RealAtomFilterTool,
+    RDRealAtomFilterTool,
     RDSingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -2405,7 +2174,6 @@ rdkit_feature_tools = [
 
     ## RDSpecifiedChiralAtomsFeatureTool,
     ## RDUnspecifiedChiralBondsFeatureTool,
-    RDOpenFFFeatureTool,
     RDPatternFeatureTool,
     RDCircularFeatureTool,
 ]
@@ -2434,9 +2202,12 @@ add_filename_argument(rdkit_parser)
     
 def rdkit_command(parser, args):
     from rdkit import Chem
-    
+
     try:
-        reader = iter_rdkit_ids_and_mols(args.filename, args.id_tag)
+        reader = read_ids_and_records(
+            args.filename,
+            id_tag = args.id_tag,
+            )
     except OSError as err:
         die(f"Cannot open input file: {err}")
 
@@ -2459,29 +2230,37 @@ def rdkit_command(parser, args):
     tracer = get_tracer(args.trace)
     description_logger = get_description_logger(parser, args.description)
         
-    for id, mol in reader:
-        state = State(id, mol, reporter,
-                          description_logger = description_logger)
+    for id, record in reader:
+        state = State(id, record, reporter, description_logger = description_logger)
+        
+        try:
+            with tracer.using_state(state):
+                rdmol, rd_topology = rd_parse_mol(record.record, record.record_format)
+        except Exception as err:
+            if not handle_rdkit_exception(err, state):
+                raise
+            rdmol = rd_topology = None
+            state.add_feature("rd_parse_err", "RDKitToolkitWrapper could not parse the record")
+        else:
+            state.add_feature("rd_parse_ok", "RDKitToolkitWrapper could parse the record")
+            
         if any(filter_tool.at_start(state) for filter_tool in filter_tools):
             continue
 
-        state.add_feature("rd_parse") # RDKit can parse it
-
-
-        #num_atoms = mol.GetNumAtoms(onlyExplicit=False)
-        #features.add(f"nAtoms={num_atoms}")
-        
-        for feature_tool in feature_tools:
-            with tracer.using_state(state):
-                try:
-                    feature_tool.add_features(state)
-                except Exception as err:
-                    reporter.unexpected_error(
-                        id, f"failure in {feature_tool}: {err}"
-                        )
-                    state.add_feature("FeatureFailure_openeye")
-                    
-
+        if rdmol is not None:
+            state.rdmol, state.rd_topology = rdmol, rd_topology
+            if any(filter_tool.at_mol_start(state) for filter_tool in filter_tools):
+                continue
+            
+            for feature_tool in feature_tools:
+                with tracer.using_state(state):
+                    try:
+                        feature_tool.add_features(state)
+                    except Exception as err:
+                        reporter.unexpected_error(
+                            id, f"failure in {feature_tool}: {err}"
+                            )
+                        state.add_feature("FeatureFailure_rdkit", "Unexpected RDKit feature failure")
         
         if any(filter_tool.at_end(state) for filter_tool in filter_tools):
             continue
@@ -2641,26 +2420,45 @@ class XCompareCountsFeatureTool(FeatureTool):
             
     def add_features(self, state):
         # Should have no implicit hydrogens
-        oe_num_atoms = state.oe_state.mol.NumAtoms()
-        rd_num_atoms = state.rd_state.mol.GetNumAtoms(onlyExplicit=False)
+        oe_num_atoms = state.oe_topology.n_atoms
+        rd_num_atoms = state.rd_topology.n_atoms
 
         if self.include_atom_count:
             state.add_feature(f"oe_natoms={oe_num_atoms}")
             state.add_feature(f"rd_natoms={rd_num_atoms}")
 
         if oe_num_atoms == rd_num_atoms:
-            state.add_feature("xcmp_natom_ok")
+            state.add_feature("xcmp_natom_ok", "OpenEye and RDKit wrappers have the same atom counts")
         else:
-            state.add_feature("xcmp_natom_bad")
+            state.add_feature("xcmp_natom_err", "OpenEye and RDKit wrappers have different atom counts")
             
-        oe_num_bond = state.oe_state.mol.NumBonds()
-        rd_num_bonds = state.rd_state.mol.GetNumBonds()
+        oe_num_bonds = state.oe_topology.n_bonds
+        rd_num_bonds = state.rd_topology.n_bonds
 
-        if oe_num_atoms == rd_num_atoms:
-            state.add_feature("xcmp_nbond_ok")
+        if oe_num_bonds == rd_num_bonds:
+            state.add_feature("xcmp_nbond_ok", "OpenEye and RDKit wrappers have the same bond counts")
         else:
-            state.add_feature("xcmp_nbond_bad")
+            state.add_feature("xcmp_nbond_err", "OpenEye and RDKit wrappers have different bond counts")
 
+# This can happen if RDKitToolkitWrapper created the OpenFF molecule then
+# OpenEyeToolkitWrapper tried to convert it to an OEMol.
+# See https://github.com/openforcefield/openff-toolkit/issues/1008
+# and https://github.com/openforcefield/openff-toolkit/issues/1011
+def handle_to_openeye_exception(prefix, err, state):
+    err_msg = str(err)
+    if "OpenEye bond stereochemistry assumptions failed." in err_msg:
+        state.add_feature(
+            f"{prefix}_oe_bond_assumptions_failed_err",
+            "OpenEye bond stereochemistry assumptions failed")
+        return True
+    
+    elif "OpenEye atom stereochemistry assumptions failed." in err_msg:
+        state.add_feature(
+            f"{prefix}_oe_atom_assumptions_failed_err",
+            "OpenEye atom stereochemistry assumptions failed")
+        return True
+    return False
+            
 class XCompareIsomorphicFeatureTool(FeatureTool):
     @staticmethod
     def add_arguments(parser):
@@ -2682,28 +2480,28 @@ class XCompareIsomorphicFeatureTool(FeatureTool):
         self.rd_wrapper = RDKitToolkitWrapper()
         
     def add_features(self, state):
-        oe_molecule = oe_get_cached_topology(self.oe_wrapper, state.oe_state)
-        rd_molecule = rd_get_cached_topology(self.rd_wrapper, state.rd_state)
-        if oe_molecule is None or rd_molecule is None:
+        oe_topology = state.oe_topology
+        rd_topology = state.rd_topology
+        if oe_topology is None or rd_topology is None:
             return
         
         try:
-            is_isomorphic = oe_molecule.is_isomorphic_with(
-                rd_molecule, bond_order_matching=False)
+            is_isomorphic = oe_topology.is_isomorphic_with(
+                rd_topology, bond_order_matching=False)
         except Exception as err:
-            ## state.add_feature("xcmp_isomorphism_fail")
-            if "OpenEye bond stereochemistry assumptions failed." in str(err):
-                state.add_feature("xcmp_isomorphism_fail_oe_assumptions")
+            state.add_feature("xcmp_isomorphism_fail", "OE topology is_isomorphic_with RD topology raised an exception")
+            if handle_to_openeye_exception("isomorphism", err, state):
+                pass
             else:
-                state.add_feature("xcmp_isomorphism_fail_err")
+                state.add_feature("xcmp_isomorphism_fail_unknown", "Unknown is_isomorphic_with error")
                 state.reporter.unexpected_error(
                     state.id, f"Cannot compare isomorphism: {err}")
             return
 
         if is_isomorphic:
-            state.add_feature("xcmp_isomorphic_ok")
+            state.add_feature("xcmp_isomorphic_ok", "OE and RD topologies are isomorphic")
         else:
-            state.add_feature("xcmp_isomorphic_err")
+            state.add_feature("xcmp_isomorphic_err", "OE and RD topologies are not isomorphic")
 
 
 class XCompareSmilesFeatureTool(FeatureTool):
@@ -2728,63 +2526,103 @@ class XCompareSmilesFeatureTool(FeatureTool):
         self.rd_wrapper = RDKitToolkitWrapper()
     
     def add_features(self, state):
-        oe_molecule = oe_get_cached_topology(self.oe_wrapper, state.oe_state)
-        rd_molecule = rd_get_cached_topology(self.rd_wrapper, state.rd_state)
-        if oe_molecule is None or rd_molecule is None:
+        oe_topology = state.oe_topology
+        rd_topology = state.rd_topology
+        if oe_topology is None or rd_topology is None:
             return
 
-        # TODO: Move this into its own cached to_molecule function
-        oe_smi = self.oe_wrapper.to_smiles(oe_molecule)
-        state.add_feature("xcmp_smi_oe_ok")
+        with capture_stderr_rdkit():
+            oe_smi = self.oe_wrapper.to_smiles(oe_topology)
+            
+        state.add_feature("xcmp_oe2oe_smi_ok", "Can convert OE topology to SMILES using OE wrapper")
+
         try:
-            rd_smi = self.rd_wrapper.to_smiles(rd_molecule)
-        except AssertionError:
-            state.add_feature("xcmp_smi_rd_assert_err")
+            rd_smi = self.rd_wrapper.to_smiles(rd_topology)
+        except AssertionError as err:
+            state.add_feature(
+                "xcmp_rd2rd_smi_assert_err",
+                "Assertion error converting RD topology to SMILES using RD wrapper")
+            state.reporter.unexpected_error(
+                state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
             return
-        state.add_feature("xcmp_smi_rd_ok")
-        sys.stderr.write(f"\nSMILES {state.id!r}\n  {oe_smi}\n  {rd_smi}\n")
+        
+        
+        state.add_feature("xcmp_rd2rd_smi_ok", "Can convert RD topology to SMILES using RD wrapper")
+        
+        # sys.stderr.write(f"\nSMILES {state.id!r}\n  {oe_smi}\n  {rd_smi}\n")
 
         oe_natoms = oechem.OESmilesAtomCount(oe_smi)
         rd_natoms = oechem.OESmilesAtomCount(rd_smi)
 
         if oe_natoms == rd_natoms:
-            state.add_feature("xcmp_smi_ok")
+            state.add_feature(
+                "xcmp_oe2oe_rd2rd_smi_natoms_ok",
+                "RD and OE same-toolkit SMILES have the same atom counts")
         else:
-            state.add_feature("xcmp_smi_err")
+            state.add_feature(
+                "xcmp_oe2oe_rd2rd_smi_natoms_err",
+                "RD and OE same-toolkit SMILES have different atom counts")
 
-        ## TODO: use oe_wrapper to convert rd_molecule to SMILES
-        ##  and vice-versa, then compare?
-
+        ## Now use cross-toolkit SMILES generation.
+        
         try:
-            rd_oe_smi = self.rd_wrapper.to_smiles(oe_molecule)
+            with capture_stderr_rdkit():
+                rd_oe_smi = self.rd_wrapper.to_smiles(oe_topology)
         except Chem.AtomValenceException as err:
-            state.add_feature("xcmp_smi_rd_oe_err")
+            state.add_feature("xcmp_oe2rd_smi_valence_err",
+                                  "RDKit valence error converting OE topology to SMILES using RD")
             return
-        state.add_feature("xcmp_smi_rd_oe_ok")
-        try:
-            oe_rd_smi = self.oe_wrapper.to_smiles(rd_molecule)
-        except Exception as err:
-            if "OpenEye atom stereochemistry assumptions failed." in str(err):
-                state.add_feature("xcmp_smi_oe_rd_fail")
+        except AssertionError as err:
+            # Be careful about which AssertionError was caught.
+            # Figure out the function which raise the exception.
+            tb = err.__traceback__
+            while tb.tb_next is not None:
+                tb = tb.tb_next
+            co_name = tb.tb_frame.f_code.co_name
+            if co_name == "_flip":
+                state.add_feature(
+                    "xcmp_oe2rd_smi_flip_err",
+                    "RDKit failed to flip bonds correctly",
+                    )
                 return
             raise
-        state.add_feature("xcmp_smi_oe_rd_ok")
+            
+        state.add_feature("xcmp_oe2rd_smi_ok", "Can convert OE topology to SMILES using RD")
+        
+        try:
+            oe_rd_smi = self.oe_wrapper.to_smiles(rd_topology)
+        except Exception as err:
+            if handle_to_openeye_exception("xcmp_rd2oe_smi", err, state):
+                return
+            raise
+        state.add_feature("xcmp_rd2oe_smi_ok", "Can convert RD topology to SMILES using RD")
 
         if oe_smi == oe_rd_smi:
             # Both generated with OEChem
-            state.add_feature("xcmp_smi_oe2_ok")
+            state.add_feature(
+                "xcmp_oe2oe_rd2oe_smi_ok",
+                "OE generated SMILES from RD and OE are the same",
+                )
         else:
             ## TODO:  for some reason this is always incorrect?
             # 
             #sys.stderr.write(f"\nQQOE2 {state.id!r}\n  {oe_smi}\n  {oe_rd_smi}\n")
-            state.add_feature("xcmp_smi_oe2_err")
+            state.add_feature(
+                "xcmp_oe2oe_rd2oe_smi_err",
+                "OE generated SMILES from RD and OE differ",
+                )
             
         if rd_smi == rd_oe_smi:
-            state.add_feature("xcmp_smi_rd2_ok")
+            state.add_feature(
+                "xcmp_oe2rd_rd2rd_smi_ok",
+                "RD generated SMILES from RD and OE are the same",
+                )
         else:
             #sys.stderr.write(f"\nQQRD2 {state.id!r}\n  {rd_smi}\n  {rd_oe_smi}\n")
-            state.add_feature("xcmp_smi_rd2_err")
-        
+            state.add_feature(
+                "xcmp_oe2rd_rd2rd_smi_err",
+                "RD generated SMILES from RD and OE differ",
+                )
         
 def _fix_inchi(s):
     for substr in ("/t", "/b", "/m", "/s"):
@@ -2814,34 +2652,36 @@ class XCompareInChIFeatureTool(FeatureTool):
         self.rd_wrapper = RDKitToolkitWrapper()
 
     def add_features(self, state):
-        oe_molecule = oe_get_cached_topology(self.oe_wrapper, state.oe_state)
-        rd_molecule = rd_get_cached_topology(self.rd_wrapper, state.rd_state)
-        if oe_molecule is None or rd_molecule is None:
+        oe_topology = state.oe_topology
+        rd_topology = state.rd_topology
+        if oe_topology is None or rd_topology is None:
             return
 
-        oe_inchi = self.oe_wrapper.to_inchi(oe_molecule)
-        state.add_feature("xcmp_inchi_oe_ok")
+        oe_inchi = self.oe_wrapper.to_inchi(oe_topology)
+        state.add_feature("xcmp_oe2oe_inchi_ok", "Can convert OE topology to InChI using OE wrapper")
+        
         try:
-            rd_inchi = self.rd_wrapper.to_inchi(rd_molecule)
+            with capture_stderr_rdkit():
+                rd_inchi = self.rd_wrapper.to_inchi(rd_topology)
         except AssertionError:
-            state.add_feature("xcmp_inchi_rd_assert_err")
+            state.add_feature("xcmp_rd2rd_inchi_assert_err")
             return
-        state.add_feature("xcmp_inchi_rd_ok")
+        state.add_feature("xcmp_rd2rd_inchi_ok", "Can convert RD topology to InChI using RD wrapper")
 
         fixed_oe_inchi = _fix_inchi(oe_inchi)
         fixed_rd_inchi = _fix_inchi(rd_inchi)
         if fixed_oe_inchi == fixed_rd_inchi:
-            state.add_feature("xcmp_inchi_ok")
+            state.add_feature("xcmp_oe_rd_inchi_ok", "RD and OE InChI strings match")
         else:
-            sys.stderr.write(f"INCHI {state.id!r}\n  {oe_inchi}\n  {rd_inchi}\n")
-            state.add_feature("xcmp_inchi_err")
+            #sys.stderr.write(f"INCHI {state.id!r}\n  {oe_inchi}\n  {rd_inchi}\n")
+            state.add_feature("xcmp_oe_rd_inchi_err", "RD and OE InChI strings do not match")
 
 
 
 xcompare_filter_tools = [
     # These are manually initialized
     SeenIdsFilterTool,
-    RealAtomFilterTool,
+    OERealAtomFilterTool,
     OESingleComponentFilterTool,
     NovelFeaturesFilterTool,
     ]
@@ -2888,7 +2728,7 @@ def xcompare_command(parser, args):
     capture_oe_warnings()
 
     seen_ids_filter = SeenIdsFilterTool.initialize(parser, args)
-    real_atoms_filter = RealAtomFilterTool.initialize(parser, args)
+    real_atoms_filter = OERealAtomFilterTool.initialize(parser, args)
     component_filter = OESingleComponentFilterTool.initialize(parser, args)
     novel_filter = NovelFeaturesFilterTool.initialize(parser, args)
     
@@ -2908,69 +2748,69 @@ def xcompare_command(parser, args):
     tracer = get_tracer(args.trace)
     description_logger = get_description_logger(parser, args.description)
     
-    for recno, (id, text_mol) in enumerate(reader, 1):
+    for recno, (id, record) in enumerate(reader, 1):
         assert id, f"Missing id for record #{recno}"
-        state = State(id, text_mol, reporter,
+        state = State(id, record, reporter,
                           description_logger = description_logger)
         if seen_ids_filter is not None and seen_ids_filter.at_start(state):
             continue
         
-        state.add_feature("parse")
-
-        with tracer.using_state(state):
-            try:
-                oemol, oe_topology = oe_parse_mol(text_mol.record, text_mol.record_format)
-            except Exception as err:
-                if not handle_openeye_exception(err, state):
-                    raise
-                oemol = oe_topology = None
-        
-        if oemol is None:
-            state.add_feature("oe_parse_err")
+        try:
+            with tracer.using_state(state):
+                oemol, oe_topology = oe_parse_mol(record.record, record.record_format)
+        except Exception as err:
+            if not handle_openeye_exception(err, state):
+                raise
+            oemol = oe_topology = None
+            state.add_feature("oe_parse_err", "OpenEyeToolkitWrapper could not parse the record")
         else:
-            state.add_feature("oe_parse")
+            state.add_feature("oe_parse_ok", "OpenEyeToolkitWrapper could parse the record")
+            
         oe_warnings.add_features(state)
         
-        with tracer.using_state(state):
-            try:
-                rdmol, rd_topology = rd_parse_mol(text_mol.record, text_mol.record_format)
-            except Exception as err:
-                if not handle_rdkit_exception(err, state):
-                    raise
-                oemol = oe_topology = None
-            
-        if rdmol is None:
-            state.add_feature("rd_parse_err")
+        try:
+            with tracer.using_state(state):
+                rdmol, rd_topology = rd_parse_mol(record.record, record.record_format)
+        except Exception as err:
+            if not handle_rdkit_exception(err, state):
+                raise
+            rdmol = rd_topology = None
+            state.add_feature("rd_parse_err", "RDKitToolkitWrapper could not parse the record")
         else:
-            state.add_feature("rd_parse")
+            state.add_feature("rd_parse_ok", "RDKitToolkitWrapper could parse the record")
+
         rd_warnings.add_features(state)
 
         if rdmol is not None and oemol is not None:
-            oe_state = State(id, oemol, reporter, features = state.features,
-                                 description_logger = description_logger,
-                                 cache = {"oe_topology": oe_topology})
-            if real_atoms_filter.at_start(oe_state):
+            state.rdmol = rdmol
+            state.rd_topology = rd_topology
+            state.oemol = oemol
+            state.oe_topology = oe_topology
+            
+            if real_atoms_filter.at_mol_start(state):
                 continue
-            if component_filter is not None and component_filter.at_start(oe_state):
+            
+            if component_filter is not None and component_filter.at_mol_start(state):
                 continue
 
-            rd_state = State(id, rdmol, reporter, features = state.features,
-                                 description_logger = description_logger,
-                                 cache = {"rd_topology": rd_topology})
-
-            state.oe_state = oe_state
-            state.rd_state = rd_state
-
-
+            # Reset any previous messages
+            rd_msg_handler.Clear()
+            
             for feature_tool in feature_tools:
                 with tracer.using_state(state):
                     try:
                         feature_tool.add_features(state)
                     except Exception as err:
+                        raise
                         reporter.unexpected_error(
                             id, f"failure in {feature_tool}: {err}"
                             )
-                        state.add_feature("FeatureFailure_xcompare")
+                        state.add_feature(
+                            "FeatureFailure_xcompare",
+                            "Unexpected FeatureFailure during xcompare"
+                            )
+
+            rd_warnings.add_features(state)
 
 
         if novel_filter is not None and novel_filter.at_end(state):
