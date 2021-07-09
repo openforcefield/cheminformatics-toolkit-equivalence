@@ -1,7 +1,6 @@
-# off_coverage 0.9
+# off_coverage 1.0
 
-NOTE: this is the first release at [Open Force Field's GitHub repo](https://github.com/openforcefield/cheminformatics-toolkit-equivalence) insted of a [personal Sourcehut repo](https://hg.sr.ht/~dalke/off_coverage).
-
+NOTE: this project was previously hosted on [Sourcehut](https://hg.sr.ht/~dalke/off_coverage).
 
 ## Goal
 
@@ -121,31 +120,29 @@ C1C(C)=C(C=CC(C)=CC=CC(C)=CCO)C(C)(C)C1 vitamin a
 O=C(C)Oc1ccccc1C(=O)O aspirin
 ```
 
-I'll use the 'rdkit' command to generate atom counts and include
-features which came from converting the RDMol into an OpenFF topology
-using `from_object()`:
+I'll use the 'rdkit' command to have OpenFF use RDKit to the SMILES
+file and generate an OpenFF topology using `from_file_obj()`.
 
 ```
-% python off_coverage.py rdkit small.smi --atom-count --openff 
-caffeine	rd_natoms=24 rd_openff_good rd_parse
-vitamin a	rd_natoms=48 rd_off_undef_stereo_bond rd_parse
-aspirin	rd_natoms=21 rd_openff_good rd_parse
+% python off_coverage.py rdkit small.smi --atom-count
+caffeine	rd_natoms=24 rd_parse_ok
+vitamin a	rd_off_undef_stereo_bond rd_parse_err
+aspirin	rd_natoms=21 rd_parse_ok
 ```
 
-On the first output line, the `rd_parse` means that RDKit was able to
-parse the record into an RDKit molecule, the `rd_openff_good` means
-that OpenFF was able to convert the molecule into a topology object,
-and the `rd_natoms=21` means there were 21 atoms in total (including
-hydrogens).
+On the first output line, the `rd_parse_ok` means that OpenFF's
+RDKitToolkitWrapper was able to parse the record into an RDKit
+molecule and the `rd_natoms=21` means there were 24 atoms in total
+(including hydrogens) in the OpenFF Molecule.
 
 On the second output line, the `rd_off_undef_stereo_bond` means OpenFF
-could not convert the molecule into topology object because there was
-an undefined stereo bond.
+could not convert the molecule into its Molecule because there was an
+undefined stereo bond.
 
 I'll do it again, this time saving the results to a file:
 
 ```
-% python off_coverage.py rdkit small.smi --openff --atom-count -o small.feats
+% python off_coverage.py rdkit small.smi --atom-count -o small.feats
 ```
 
 I'll then set up a Z3 solver using the features, find the optimal
@@ -181,11 +178,43 @@ has a weight of 1. The weight value can be changed with `minimize
 
 ```
 % python off_coverage.py minimize small.feats --weight rd_natoms --quiet
+ Unable to evaluate 'rd_natoms' for id 'vitamin a': name 'rd_natoms' is not defined
+ Available names are: ['rd_off_undef_stereo_bond', 'rd_parse_err']
+```
+
+Okay, not *quite* that. The problem is `rd_natoms` isn't defined for
+record "vitamin a". The value after `--weight` is a Python expression
+evaluated for each entry in the feature file. Each feature and feature
+weight is available as a Python variable with the same name. Features
+have a value of True and feature weights have the corresponding
+value (that is, the feature weight `rd_natoms=21` is available as the
+Python variable name `rd_natoms` with integer value 21).
+
+In addition, the special variable '_' is a dictionary mapping feature
+or feature weight name to its value. This can be useful if your
+feature name is a Python reserved word because you can write `_["in"]`
+to get access to the feature named `in`.
+
+This can also be used to test if a variable exists, using a dictionary
+contains test (`key in dict`):
+
+```
+% python off_coverage.py minimize small.feats --weight 'rd_natoms if "rd_parse_ok" in _ else 0' --quiet
+Solution: optimal Selected: 2/3
 1	vitamin a
 1	aspirin
 ```
 
-This example sets up Z3 to weight each structure by `rd_natoms`, which
+or by using `dict.get()` to return a default value if the name doesn't exist:
+
+```
+% python off_coverage.py minimize small.feats --weight '_.get("rd_natoms", 0)' --quiet
+Solution: optimal Selected: 2/3
+1	vitamin a
+1	aspirin
+```
+
+Both examples set up Z3 to weight each structure by `rd_natoms`, which
 is a feature weight containing the number of atoms. The above will
 minimize the total number of atoms, which won't change anything
 because the default output coincidentally chose that solution.
@@ -193,33 +222,20 @@ because the default output coincidentally chose that solution.
 I'll let's change things and minimize the negative weight:
 
 ```
-% python off_coverage.py minimize small.feats --weight -rd_natoms
-usage: off_coverage.py z3_create [-h] [--weight EXPR] [--output OUTPUT]
-                                 filename
-off_coverage.py minimize: error: argument --weight: expected one argument
-```
-
-Ooops! That didn't work. The argument parser (Python's argparse)
-thinks `--rd_natoms` is a command-line option, not a parameter to
-weight.
-
-But that's okay - the function actually takes a Python expression, so I'll subtract from 0:
-
-```
-% python off_coverage.py minimize small.feats --weight 0-rd_natoms --quiet
+% python off_coverage.py minimize small.feats --weight '-_.get("rd_natoms", 0)' -q
 Solution: optimal Selected: 3/3
 1	caffeine
 1	vitamin a
 1	aspirin
 ```
 
-Oops! That still doesn't work. This selects all of the molecules,
-because that gives the largest negative number!
+Oops! That doesn't work. This selects all of the molecules, because
+that gives the largest negative number!
 
 Try again, this time subtracting from a large number:
 
 ```
-% python off_coverage.py minimize small.feats --weight 10000-rd_natoms -q
+% python off_coverage.py minimize small.feats --weight '1000-_.get("rd_natoms", 0)' -q
 Solution: optimal Selected: 2/3
 1	caffeine
 1	vitamin a
@@ -227,36 +243,31 @@ Solution: optimal Selected: 2/3
 
 Yes, this is the correct solution.
 
-The weight expression can use any of the defined feature weights. Each
-feature name is also available (as True). This is useful to have
-default for missing cases, for example: `1000 if rd_parse_fail else
-rd_natoms` will use the value of 1000 if the `rd_parse_fail` feature
-is present, presumably indicating that RDKit was unable to parse the
-record.
+Two other special variables are available, in addition to the `_`
+mentioned earlier. The special variable `_features` is a set
+containing only the feature names. For example, you can strongly
+weight the result to prefer a small number of features per record by
+using something like `len(_features)**2`. The special variable `ID`
+stores the record id.
 
-Alternatively, the special variable `_` refers to the dictionary of
-features and feature weights, so you could do `rd_natoms if
-"rd_natoms" in _ else 1000`.
-
-The special variable `_features` is a set containing only the feature
-names. For example, you can strongly weight the result to prefer a
-small number of features per record by using something like
-`len(_features)**2`. The special variable `ID` stores the record id.
-
-Note: the weight expression must return an integer.
+Note: the `--weight` expression must return an integer.
 
 ## RDKit feature generation
 
 By default the "rdkit" command will:
+
+* Convert the RDKit molecule into an OpenFF Molecule using
+RDKitToolkitWrapper, which applies OpenFF's full normalization (add
+hydrogens, perceive stereo, etc.)
+
+* Skip any molecules with an atom containing element #0 (typically
+wildcard atoms ("`*`") in SMILES or R-groups in an SDF).
 
 * Parse the RDKit warning messages and include a feature for each
 different type of message (the `--parse-warnings`) option
 
 * Include the rd_natoms feature weight  (the `--atom-count` option)
 
-* Convert the RDKit molecule into an OpenFF topology (the `--openff`
-option)
-
 There is experimental code to generate features based on circular
 fingerprints (`--circular`). That does not seem useful as OpenFF
 doesn't need test cases for all possible circular environments.
@@ -266,27 +277,22 @@ substructure searching (`--patterns`). This is more likely to be
 useful in the future, but is probably broken and definitely not useful
 now.
 
-Note: The rdkit standardization currently only does:
-
-```
-def rd_standardize_mol(mol):
-    return Chem.AddHs(mol)
-```
-
-Future work should make it be more like the OpenFF standardizer.
-
 ## OEChem feature generation
 
 By default the "openeye" command will:
+
+* Convert the OEGraphMol into an OpenFF Molecule using
+OpenEyeToolkitWrapper, which applies OpenFF's full normalization (add
+hydrogens, perceive stereo, etc.)
+
+* Skip any molecules with an atom containing element #0 (typically
+wildcard atoms ("`*`") in SMILES or R-groups in an SDF).
 
 * Parse the OEChem warning messages and include a feature for each
 different type of message (the `--parse-warnings`) option
 
 * Include the oe_natoms feature weight  (the `--atom-count` option)
 
-* Convert the OEGraphMol into an OpenFF topology (the `--openff`
-option)
-
 There is experimental code to generate features based on circular
 fingerprints (`--circular`). That does not seem useful as OpenFF
 doesn't need test cases for all possible circular environments.
@@ -295,22 +301,6 @@ There is experimental code to accept a pattern definition file for
 substructure searching (`--patterns`). This is more likely to be
 useful in the future, but is probably broken and definitely not useful
 now.
-
-Note: The OEChem standardization currently only does:
-
-```
-def oe_standarize_mol(mol):
-    if not oechem.OEAddExplicitHydrogens(mol):
-        if oe_msg_handler is not None:
-            oe_msg_handler.messages.append(
-                "WARNING: Unable to add explicit hydrogens"
-                )
-    oechem.OEAssignAromaticFlags(mol, oechem.OEAroModel_MDL)
-    oechem.OEPerceiveChiral(mol)
-    return mol
-```
-
-Future work should make it be more like the OpenFF standardizer.
 
 ## Common options
 
@@ -322,7 +312,8 @@ the identifier. Use `--id-tag` to get the id from a tag in the SD record.
 
 - The `--novel` flag only outputs a new feature record if at least one
 of the features hasn't been seen more than `N` times (by default, 1)
-Use `--novel-count` to change the value of N.
+Use `--novel-count` to change the value of N. If `--novel-count` is
+specied then `--novel` does not also need to be specified.
 
 - Use `--quiet` to disable status information from the off_coverage.py
 tool.
@@ -330,6 +321,10 @@ tool.
 - Use `-o` or `--output` have the output go to the named file instead
 of stdout.
 
+- Use `--description` to save a mapping of feature name to a more
+human-readable description to the named file.
+
+- Use `--trace` to include code-coverage-based features.
 
 - The `--ids` option is completely untested. The idea is to use or
 exclude records if the id is specified in a given file.
@@ -342,32 +337,104 @@ and/or molecular weight and/or other features.
 By default the `xcompare` subcommand will:
 
 - Parse SMILES and SDF records and pass the record to the underlying
-chemistry toolkits. This gives an way to check if a toolkit failed on
-a specific record, and record that failure.
+OpenFF toolkit wrappers. This gives an way to check if a toolkit
+failed on a specific record, and record that failure.
 
-- Compute atom and bond counts (`--counts`) using both toolkits and
-set features if they match or don't match. By default this will also
-add the `rd_natoms` and `oe_natoms` weight features. This can be
-disabled with `--no-atom-count`.
+- Compute atom and bond counts (`--counts`) using the OpenFF molecules
+generated by each toolkit wrapper and set features if they match or
+don't match. By default this will also add the `rd_natoms` and
+`oe_natoms` weight features. This can be disabled with
+`--no-atom-count`.
 
-- Generate an OpenFF topology for both RDKit and OpenEye toolkit
-wrappers, and record success or failure. If successful, compare the
-two for isomorphism and report success or failure (`--isomorphic`).
+- Compare the two wrapper-generated OpenFF Molecules for isomorphism
+and report success or failure (`--isomorphic`).
 
 - Convert both OpenFF topology objects (if available) back to SMILES,
 using both wrappers for each, and compare that the toolkit generate
 canonically correct SMILES for the given wrapper (`--smiles`).
 
-- There is an incomplete `--inchi` option which does the same with
-InChI. This didn't seem to add more information than `--smiles`
-because most of the issues came from converting the toplogy object to
-the given chemistry toolkit molecule.
+The one non-default feature is:
+
+- Compere the InChI's generated from each wrapper-generated OpenFF
+Molecule using the two toolkit wrappers (`--inchi`).
+
+This doesn't seem to add more information than `--smiles` because most
+of the issues came from converting the toplogy object to the given
+chemistry toolkit molecule.
+
+## xcompare using CHEMBL113 (caffeine), and `--description`
+
+I'll use `xcompare` to analyze
+`[CHEMBL113.sdf](https://www.ebi.ac.uk/chembl/compound_report_card/CHEMBL113/)`,
+which is the ChEMBL record for caffeine. First, I'll download it from
+ChEMBL. Annoyingly, their download doesn't include the "`$$$$`"
+terminator for SDF records, so I'll have to add that to the downloaded
+record:
+
+```
+% curl -O 'https://www.ebi.ac.uk/chembl/api/data/molecule/CHEMBL113.sdf'
+% printf '\n$$$$\n' >> CHEMBL113.sdf
+```
+
+As another nuisance, ChEMBL doesn't store a usable id in the SDF
+record's title line, the feature files need a usable id, and
+`off_coverage` raises an exception if that happens:
+
+
+```
+% python off_coverage.py xcompare CHEMBL113.sdf
+Traceback (most recent call last):
+  File "off_coverage.py", line 3435, in <module>
+    main()
+  File "off_coverage.py", line 3432, in main
+    parsed_args.command(parsed_args.subparser, parsed_args)
+  File "off_coverage.py", line 2922, in xcompare_command
+    raise ValueError(f"Missing id for record #{recno}")
+ValueError: Missing id for record #1
+```
+
+But that's okay, the `off_coverage` commands support `--id-tag` to get
+the record name from the named tag.
+
+```
+% python off_coverage.py xcompare CHEMBL113.sdf --id-tag chembl_id | fold -s
+CHEMBL113	oe_natoms=24 oe_parse_ok rd_natoms=24 rd_parse_ok
+xcmp_isomorphic_ok xcmp_natom_ok xcmp_nbond_ok xcmp_oe2oe_rd2oe_smi_ok
+xcmp_oe2oe_rd2rd_smi_natoms_ok xcmp_oe2oe_smi_ok xcmp_oe2rd_rd2rd_smi_ok
+xcmp_oe2rd_smi_ok xcmp_rd2oe_smi_ok xcmp_rd2rd_smi_ok
+```
+
+That's rather a lot of opaque feature names. What do they mean?
+
+You can get a mapping from the feature name to its full description
+using the `--description` option, which saves those unique
+descriptions to the named file.
+
+```
+% python off_coverage.py xcompare CHEMBL113.sdf --id-tag chembl_id \
+        --description caffeine.txt > /dev/null
+% cat caffeine.txt
+oe_parse_ok	OpenEyeToolkitWrapper could parse the record
+rd_parse_ok	RDKitToolkitWrapper could parse the record
+xcmp_natom_ok	OpenEye and RDKit wrappers have the same atom counts
+xcmp_nbond_ok	OpenEye and RDKit wrappers have the same bond counts
+xcmp_isomorphic_ok	OE and RD topologies are isomorphic
+xcmp_oe2oe_smi_ok	Can convert OE topology to SMILES using OE wrapper
+xcmp_rd2rd_smi_ok	Can convert RD topology to SMILES using RD wrapper
+xcmp_oe2oe_rd2rd_smi_natoms_ok	RD and OE same-toolkit SMILES have the same atom counts
+xcmp_oe2rd_smi_ok	Can convert OE topology to SMILES using RD
+xcmp_rd2oe_smi_ok	Can convert RD topology to SMILES using RD
+xcmp_oe2oe_rd2oe_smi_ok	OE generated SMILES from RD and OE are the same
+xcmp_oe2rd_rd2rd_smi_ok	RD generated SMILES from RD and OE are the same
+```
+
+(Note that there's a tab between the feature name and its description.)
 
 ## Code coverage feature generation with `--trace`
 
-All three of these feature generation subcommand support the `--trace`
-command to include a feature based on which lines of code are executed
-in the `openff.toolkit.utils.toolkits` module.
+All three of these feature generation subcommands support the
+`--trace` command to include a feature based on which lines of code
+are executed in the `openff` module or any of its submodules.
 
 The above test conditions treat the code as a black box as it only
 looks at return values, exceptions, and warning/error messages. It
@@ -386,23 +453,35 @@ prefix, as in:
 
 ```
 % python off_coverage.py xcompare small.smi -o small.feats --trace on
-% fold -b -w 70 small.feats
-caffeine	oe_natoms=24 oe_openff_good oe_parse parse rd_natoms=24 rd_op
-enff_good rd_parse trace_ccf31b724b03e766be0d42cc975fda4679a3cdd79c2b6
-2e768f1889208913253 trace_de76635cb81cc901b30cc8d69f4c1faa3d9e9a0d6104
-90caddcbeda8f5a8bf3b xcmp_isomorphic_err xcmp_natom_ok xcmp_nbond_ok x
-cmp_smi_oe2_ok xcmp_smi_oe_ok xcmp_smi_oe_rd_ok xcmp_smi_ok xcmp_smi_r
-d2_ok xcmp_smi_rd_oe_ok xcmp_smi_rd_ok
-vitamin a	oe_natoms=48 oe_off_undef_stereo_bond oe_parse parse rd_nato
-ms=48 rd_off_undef_stereo_bond rd_parse trace_1d70229208662e766d61f9a9
-cbcf34074f11751b4b1efb19e93a2584bc9a3b55 xcmp_natom_ok xcmp_nbond_ok
-aspirin	oe_natoms=21 oe_openff_good oe_parse parse rd_natoms=21 rd_ope
-nff_good rd_parse trace_7644c766cd90ffd5561c41d558839a3636f70b91189f5d
-b129028be298c39fcb trace_de76635cb81cc901b30cc8d69f4c1faa3d9e9a0d61049
-0caddcbeda8f5a8bf3b xcmp_isomorphic_ok xcmp_natom_ok xcmp_nbond_ok xcm
-p_smi_oe2_ok xcmp_smi_oe_ok xcmp_smi_oe_rd_ok xcmp_smi_ok xcmp_smi_rd2
-_ok xcmp_smi_rd_oe_ok xcmp_smi_rd_ok
+% awk '{print substr($0, 1, 500)}' small.feats | fold -b -w 70
+caffeine	oe_natoms=24 oe_parse_ok rd_natoms=24 rd_parse_ok trace_00d69
+73c4b864113f064f69bf34c85c7c098d003019ab009607997e7298de0b9 trace_0115
+07fcb297a7a2d89f14bc2eb3dd3e733380b938dbea3d9ffa37f797c015db trace_012
+14d40909181e3d1796e5dbdd55d569bda9ceb6fb6d9bf354969805154d065 trace_04
+02e5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165 trace_0
+7a22e9d04590ecb2e5ad642bf7d6775fa0f6e44685e8023c2cdbd3a6a5eaa47 trace_
+0888b65e011891915642e4d72654bf0584605e4b5d59147c3a3d88cb759ac41f trace
+_090d48ea2
+vitamin a	oe_off_undef_stereo_bond oe_parse_err rd_off_undef_stereo_bo
+nd rd_parse_err trace_06581a188d3aa9679f7f20506e9c1f37415a05ba21e24e80
+980a2a596e5e3df0 trace_08b38952442bfdd7c7a35fedc5a2dd9b79e31fb3c5169dd
+44efc1496904ec8d9 trace_2ea6f5fe593ffdf636ad2a2c62f5d77673e25f87bd36fe
+fda99c5b1f106a9f2e trace_4d3399336374d10b6bdd30383ea08549c059497b65ec9
+ecafb4e31b9bc913fb3 trace_55aa2222bb49d36033cb6afcc9aef2efcf64e1ccde47
+714e8d2fb1002e3b43eb trace_691e1289e9d2965305025e67871008ef0f1f29c1d9b
+f313c0ce6c
+aspirin	oe_natoms=21 oe_parse_ok rd_natoms=21 rd_parse_ok trace_01214d
+40909181e3d1796e5dbdd55d569bda9ceb6fb6d9bf354969805154d065 trace_0402e
+5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165 trace_07a2
+2e9d04590ecb2e5ad642bf7d6775fa0f6e44685e8023c2cdbd3a6a5eaa47 trace_088
+8b65e011891915642e4d72654bf0584605e4b5d59147c3a3d88cb759ac41f trace_0b
+f87c3627e7686331e275ad3477bbe16341eb580e7dda6d8e0ebe9cba5be648 trace_0
+ddb2ffa35d246898ca0f4ff428776fe6c65f464a6c5cacbb1463e2c0268280e trace_
+0ff775f6d7
 ```
+
+There are a *lot* of signatures that I didn't show. But, what are
+they?
 
 There are a several ways to generate a signature.
 
@@ -430,26 +509,65 @@ Instead, another available option is to track each function call
 separately. These are available as `func-cover`, `func-sequence` and
 `func-pairs`.
 
-These can result in different sets of unique trace features. Here is a
-summary of the selection size for a xcompare of MiniDrugBank.sdf (see
-below):
+The `--trace on` option is an alias for `--trace func-pairs`.
 
-- `mod-cover` selected: 72/371 
-- `mod-sequence` selected: 342/371
-- `mod-pairs` selected: 72/371
-- `func-cover` selected: 31/371 
-- `func-sequence` selected: 336/371
-- `func-pairs` selected: 27/371
+### trace descriptions
 
-The option `--trace on` is an alias for `--trace mod-cover`. The
-default is to not include tracing, which is the same as the option
-`--trace off`.
+Each trace feature also generates a description to the `--description`
+file, so we can out what, say, something like:
 
-I do not know if `func-pairs` is a better option than `mod-pairs`. I
-do not know why `func-pairs` selects fewer cases then `func-cover`
-since I think that should never happen.
+```
+trace_0402e5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165 
+```
 
-Well hey, something for future investigation.
+means.
+
+```
+% grep trace_0402e53676 small.txt  | fold
+trace_0402e5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165	<mod: op
+enff.toolkit.topology.molecule func: _add_bond<pairs: [(0,3932),(3932,3933),(39
+33,3934),(3934,3946),(3946,3950),(3950,3951),(3951,3952),(3952,3953),(3953,3954)
+,(3954,3955),(3955,3956),(3956,3958),(3958,3959),(3959,3961),(3961, -7923)]>>
+```
+
+This says it's a trace of the `_add_bond` function in the module
+`openff.toolkit.topology.molecule`, using the "pairs" trace method.
+
+The unique pairs for this function are given as line numbers, with a
+couple of exceptions. The `0` in `(0,3932)` indicates this is the
+first line executed in the function. The `-7923` in the last tuple
+indicates the function ended with a return from line `3961`.
+
+Why is it negative? There are two ways for a function to end; with a
+`return` or with a `raise`. Both of these have a line number
+(`lineno`). With a `return`, the value `-2*lineno-1` is used. With
+a `raise`, the value `-2*lineno-2`is used.
+
+With tedious examination it's possible to trace some of the execution
+order. I think this really needs a GUI tool for visualization.
+
+The other trace methods use different representations. I hope it's
+easy to figure out how it works. You'll have to look at the source
+code for full details.
+
+### Trace coverage sizes
+
+The different trace methods generate different sets of unique trace
+features. Here is a summary of the selection size for a xcompare of
+MiniDrugBank.sdf (see below):
+
+- `mod-sequence` selected: 370/371 
+- `mod-pairs` selected: 74/371 
+- `mod-cover` selected: 60/371
+- `func-sequence` selected: 354/371
+- `func-pairs` selected: 35/371
+- `func-cover` selected: 29/371
+
+In general, the module-level trace methods require greater code path
+similarity than the function-level methods; and `sequence` requires
+greater code path similarity than `pairs`, which requires greater code
+path similarity than `cover`.
+
 
 ## Putting it all together
 
@@ -460,112 +578,83 @@ for MiniDrugBank:
 % python off_coverage.py xcompare --trace on MiniDrugBank.sdf -o MiniDrugBank.feats
 ```
 
-That generates output like the following two lines (folded for readability):
+That generates output like the following two lines (severely trimmed for readability):
 
 ```
-% head -2 MiniDrugBank.feats | fold -w 75 -s
-DrugBank_5354	oe_natoms=44 oe_openff_good oe_parse parse rd_natoms=44
-rd_openff_good rd_parse
-trace_181f38a7bb91f03268f985b9c235a4f405563ebcff8ed2eace58162ada4c0c7f
-trace_8320c8e8a89100dd4f471ed9d311b60d04aa94704de0d3d81dc2d7f9ae3870b7
-xcmp_isomorphic_ok xcmp_natom_ok xcmp_nbond_ok xcmp_smi_oe2_ok
-xcmp_smi_oe_ok xcmp_smi_oe_rd_ok xcmp_smi_ok xcmp_smi_rd2_ok
-xcmp_smi_rd_oe_ok xcmp_smi_rd_ok
-DrugBank_2791	oe_natoms=19 oe_openff_good oe_parse parse rd_natoms=19
-rd_openff_good rd_parse
-trace_08be8cfd08795036334181c48bbd00b04e2002fa4b223cec3385abc50266a863
-trace_cad8d98ca19220fb7dbb98fc19229d24d527c2407a0885572f092f5751165a54
-xcmp_isomorphic_ok xcmp_natom_ok xcmp_nbond_ok xcmp_smi_oe2_ok
-xcmp_smi_oe_ok xcmp_smi_oe_rd_ok xcmp_smi_ok xcmp_smi_rd2_ok
-xcmp_smi_rd_oe_ok xcmp_smi_rd_ok
+% head -2 MiniDrugBank.feats | awk '{print substr($0, 1, 900)}' | fold -w 75 -s
+DrugBank_5354	oe_natoms=44 oe_parse_ok rd_natoms=44 rd_parse_ok
+trace_00d6973c4b864113f064f69bf34c85c7c098d003019ab009607997e7298de0b9
+trace_011507fcb297a7a2d89f14bc2eb3dd3e733380b938dbea3d9ffa37f797c015db
+trace_01214d40909181e3d1796e5dbdd55d569bda9ceb6fb6d9bf354969805154d065
+trace_0402e5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165
+trace_0888b65e011891915642e4d72654bf0584605e4b5d59147c3a3d88cb759ac41f
+trace_090d48ea2e1d45ee01639c83431e11dd7125ed4afe510664112c6ed101421dd4
+trace_0bd8730eb2c3f36e0174dbea6febe48c15f9614844f037c298629b92cac113cf
+trace_0d9c32972dc842798a13a9d0c69acfc082a46dfab9dbc4eeb246074dc067ee2c
+trace_0ddb2ffa35d246898ca0f4ff428776fe6c65f464a6c5cacbb1463e2c0268280e
+trace_0ff775f6d7cbcb51675394b12592c743aed60517ca4f224f7fab0c520ac62bb5
+trace_11c00f044b4643a8d80afd72cd61fd5d38ede45b9e3ce9ed80ec961b736f20f8
+trace_1548bedae311d53ef28c2d128fa29fa7fc6ee7cd2bdef8587
+DrugBank_2791	oe_natoms=19 oe_parse_ok rd_natoms=19 rd_parse_ok
+trace_01214d40909181e3d1796e5dbdd55d569bda9ceb6fb6d9bf354969805154d065
+trace_0402e5367624eddc8be80d9958c92000ad55fe29b067318b3ca16f0295842165
+trace_0888b65e011891915642e4d72654bf0584605e4b5d59147c3a3d88cb759ac41f
+trace_0ddb2ffa35d246898ca0f4ff428776fe6c65f464a6c5cacbb1463e2c0268280e
+trace_0ff775f6d7cbcb51675394b12592c743aed60517ca4f224f7fab0c520ac62bb5
+trace_1548bedae311d53ef28c2d128fa29fa7fc6ee7cd2bdef858756a775e31344710
+trace_171eced97b9e1d829dd54162dbc7115f8ff0f122cd8cba73c2e97c36c3c7d429
+trace_196db8571afc1e27581147b1547db4f6ec9223a13c2d699e12cd990df7649257
+trace_1af8befd8ee92bbe29643bcdf4a2ef4febae1ae13402fadc794c24cf09694350
+trace_1be3393c06f6db9a4a08aec57e1bf28e4720b762c316d3f2878ebf26bbc91e16
+trace_1f4309b6c6e16104688d0960bcdfcb668e3f77d833e0a51a8126652a9ed69504
+trace_22f8f57ec2cfd2531e0933fe1f2f7f9cd985da01f0cacd704
  ```
 
-I used Z3 to minimize the result, which it did in under a second:
+I used Z3 to minimize the result, which it did in about four seconds:
 
 ```
 % python off_coverage.py minimize MiniDrugBank.feats -q
-Solution: optimal Selected: 72/371
+Solution: optimal Selected: 35/371
 1	DrugBank_5354
-1	DrugBank_2800
-1	DrugBank_5418
-1	DrugBank_104
-1	DrugBank_5516
-1	DrugBank_5523
-1	DrugBank_2967
+1	DrugBank_5387
 1	DrugBank_246
-1	DrugBank_2991
-1	DrugBank_3028
-1	DrugBank_3046
-1	DrugBank_3087
-1	DrugBank_390
-1	DrugBank_5804
-1	DrugBank_3346
-1	DrugBank_3358
-1	DrugBank_3406
-1	DrugBank_5900
-1	DrugBank_5902
+1	DrugBank_423
 1	DrugBank_3479
-1	DrugBank_3503
 1	DrugBank_3547
-1	DrugBank_3565
-1	DrugBank_6032
-1	DrugBank_914
-1	DrugBank_977
+1	DrugBank_3581
+1	DrugBank_3693
 1	DrugBank_6182
-1	DrugBank_3817
-1	DrugBank_3954
-1	DrugBank_6355
-1	DrugBank_4074
-1	DrugBank_1448
-1	DrugBank_1449
-1	DrugBank_4138
+1	DrugBank_6295
 1	DrugBank_4161
 1	DrugBank_1538
 1	DrugBank_6531
-1	DrugBank_1564
-1	DrugBank_6533
-1	DrugBank_4215
-1	DrugBank_4217
-1	DrugBank_1598
-1	DrugBank_1608
 1	DrugBank_4249
-1	DrugBank_1637
-1	DrugBank_1661
-1	DrugBank_6647
+1	DrugBank_1700
 1	DrugBank_4323
-1	DrugBank_1721
-1	DrugBank_1722
-1	DrugBank_1742
-1	DrugBank_6722
+1	DrugBank_4346
+1	DrugBank_6775
 1	DrugBank_4468
-1	DrugBank_4515
-1	DrugBank_6865
-1	DrugBank_4580
-1	DrugBank_1971
+1	DrugBank_1849
+1	DrugBank_4593
 1	DrugBank_4662
 1	DrugBank_7108
-1	DrugBank_7124
-1	DrugBank_2140
+1	DrugBank_2095
 1	DrugBank_2148
+1	DrugBank_2178
 1	DrugBank_2186
-1	DrugBank_2237
+1	DrugBank_2210
 1	DrugBank_4959
 1	DrugBank_2429
-1	DrugBank_5154
+1	DrugBank_2538
 1	DrugBank_2563
-1	DrugBank_2570
-1	DrugBank_2584
-1	DrugBank_2585
+1	DrugBank_2642
 1	DrugBank_2684
+1	DrugBank_2728
 ```
 
 In hand-wavy theory this means the test set can go from 371 structures
-to only 72!
+to only 35!
 
-Or down to 27 if `func-pairs` gives valid coverage.
-
-Of course, this is only the first pass, and it doesn't include any of
-the topology considerations. Still, it seems a promising path.
 
 ## first line of `minimize` output, and --timeout
 
@@ -659,7 +748,79 @@ This found that 10 of the MiniDrugBank records in the 72 molecule
 subset could be replaced by ChEBI records. (But I'll need to examine
 things more closely as `--no-new-features` is barely tested.)
 
+## subtract command
 
+This tool was used to
+[reduce the number of test cases in OpenFF](https://github.com/openforcefield/openff-toolkit/pull/999)
+based on code coverage analysis.
+
+Sometimes this could be done by generating trace features and finding
+a minimal solution. Other cases required a differential analysis,
+where I wanted the coverage for Y, but computing Y also required
+computing X. My approach was generate the coverage for X, generate the
+coverage for X+Y, then `subtract` the former features from the latter,
+leaving only the unique features for Y.
+
+I'll use that to see which functions the `--inchi` tests adds to the
+`xcompare` analysis.
+
+```
+% python off_coverage.py xcompare small.smi --trace on -o small_default.feats
+% python off_coverage.py xcompare small.smi --trace on -o small_default_inchi.feats--default --inchi
+% python off_coverage.py subtract small_default_inchi.feats small_default.feats -o small_inchi.feats
+```
+
+The resulting `small_inchi.feats` file is significantly smaller than
+the other two feature files:
+
+```
+% wc small_default.feats
+       3     287   18420 small_default.feats
+% wc small_default_inchi.feats
+       3     297   18824 small_default_inchi.feats
+% wc small_inchi.feats
+       3      18     484 small_inchi.feats
+```
+
+It's so small that I'll display the (folded) content here:
+
+```
+% fold -s small_inchi.feats
+caffeine	oe_natoms=24 rd_natoms=24
+trace_098e8177c862aa994d8062aabb1f4c7204b6e6f6cd79a21c9285f5e52cbb9ff1
+trace_e0c125114890b6370fcf3bb75a6d9e3de010d2768b50a43a763a87309bef9196
+xcmp_oe2oe_inchi_ok xcmp_oe_rd_inchi_ok xcmp_rd2rd_inchi_ok
+vitamin a
+aspirin	oe_natoms=21 rd_natoms=21
+trace_098e8177c862aa994d8062aabb1f4c7204b6e6f6cd79a21c9285f5e52cbb9ff1
+trace_e0c125114890b6370fcf3bb75a6d9e3de010d2768b50a43a763a87309bef9196
+xcmp_oe2oe_inchi_ok xcmp_oe_rd_inchi_ok xcmp_rd2rd_inchi_ok
+```
+
+There are only two new function calls! I'll re-do the `--default
+--inchi` analysis to also include the code description, and see what
+those functions are:
+
+```
+% python off_coverage.py xcompare small.smi --trace on -o small_default_inchi.feats \
+     --default --inchi --description small_default_inchi.description
+% egrep '098e8177c862|e0c125114890' small_default_inchi.description
+trace_e0c125114890b6370fcf3bb75a6d9e3de010d2768b50a43a763a87309bef9196	<mod: openff.toolkit.utils.rdkit_wrapper func: to_inchi <pairs: [(0,1826),(1826,1828),(1828,1829),(1829,1832),(1832,1833),(1833,-3667)]>>
+trace_098e8177c862aa994d8062aabb1f4c7204b6e6f6cd79a21c9285f5e52cbb9ff1	<mod: openff.toolkit.utils.openeye_wrapper func: to_inchi <pairs: [(0,1385),(1385,1387),(1387,1389),(1389,1395),(1395,1397),(1397,-2795)]>>
+```
+
+These make identical function calls, and inspection shows the
+`--inchi` tests add nothing beyond detecting failures in the
+underlying toolkit, so we can reduce the entire test suite to a single
+case:
+
+```
+% python off_coverage.py minimize small_inchi.feats -q
+Solution: optimal Selected: 1/3
+1	caffeine
+```
+
+## Programmatic interface
 
 ## Legal
 
