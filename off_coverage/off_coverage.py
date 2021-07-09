@@ -1913,7 +1913,6 @@ def rd_to_smiles(rd_wrapper, topology, state):
         ##     state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
         return None
     except Chem.AtomValenceException as err:
-        raise
         # 1/45043 records in ChEBI generated this feature. This one is:
         # CHEBI:149672 XXX VERIFY
         state.add_feature(
@@ -2836,6 +2835,17 @@ class XCompareInChIFeatureTool(FeatureTool):
                 "xcmp_rd2rd_inchi_assert_err",
                 "AssertionError trying to convert RD topology to InChI using RD wrapper")
             return
+        except KeyError:
+            state.add_feature(
+                "xcmp_rd2rd_inchi_keyerror_err",
+                "KeyError error converting RD topology to InChI using RD wrapper")
+            return None
+        except Chem.AtomValenceException as err:
+            state.add_feature(
+                "xcmp_rd2rd_inchi_valence_err",
+                "AtomValenceException converting RD topology to InChI using RD wrapper")
+            return
+        
         state.add_feature("xcmp_rd2rd_inchi_ok", "Can convert RD topology to InChI using RD wrapper")
 
         fixed_oe_inchi = _fix_inchi(oe_inchi)
@@ -2972,6 +2982,7 @@ def xcompare_command(parser, args):
                     try:
                         feature_tool.add_features(state)
                     except Exception as err:
+                        raise
                         reporter.unexpected_error(
                             id, f"failure in {feature_tool}: {err}"
                             )
