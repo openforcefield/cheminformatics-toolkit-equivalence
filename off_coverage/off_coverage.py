@@ -75,8 +75,8 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-__version__ = "0.9"
-__version_info__ = (0, 9, 0)
+__version__ = "1.0"
+__version_info__ = (1, 0, 0)
 __author__ = "Andrew Dalke <dalke@dalkescientific.com>"
 __funding__ = "The Open Force Field Initiative"
 
