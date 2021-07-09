@@ -1185,8 +1185,14 @@ class OEWarningFeatureTool(FeatureTool):
         num_bad_stereo = 0
         for msg in oe_msg_handler.messages:
             if "Unsupported Sgroup information ignored" in msg:
+                # 606/45043 records in ChEBI generate this feature. The first few are:
+                # CHEBI:1269, CHEBI:3523, CHEBI:15338, CHEBI:15379, CHEBI:15444,
+                # CHEBI:15446, CHEBI:15447, CHEBI:15693, CHEBI:15731, CHEBI:15750
                 state.add_feature("oe_err_Sgroup", "OEChem warning: Unsupported Sgroup information ignored")
             elif "Stereochemistry corrected on atom" in msg:
+                # 527/45043 records in ChEBI generate this feature. The first few are:
+                # CHEBI:3048, CHEBI:5638, CHEBI:7025, CHEBI:7569, CHEBI:8691,
+                # CHEBI:9688, CHEBI:15387, CHEBI:15398, CHEBI:15982, CHEBI:16060
                 num_bad_stereo += 1
                 state.add_feature("oe_err_AS", "OEChem warning: Stereochemistry corrected on atom")
             elif "Unable to add explicit hydrogens" in msg:
@@ -1195,14 +1201,24 @@ class OEWarningFeatureTool(FeatureTool):
                 state.add_feature("oe_err_smi", "OEChem warning: Problem parsing SMILES")
                 break
             elif "OE3DToAtomStereo is unable to perceive atom stereo from a flat geometry" in msg:
-                state.add_feature("oe_err_flat_stereo", "OEChem warning: unable to perceive atom stereo from a flat geometry")
+                # 18/45043 records in ChEBI generate this feature. These are:
+                # CHEBI:2620, CHEBI:76628, CHEBI:76937, CHEBI:78952, CHEBI:78953,
+                # CHEBI:78955, CHEBI:78956, CHEBI:78966, CHEBI:78977, CHEBI:78991,
+                # CHEBI:79129, CHEBI:83300, CHEBI:83758, CHEBI:84347, CHEBI:84348,
+                # CHEBI:84353, CHEBI:84959, CHEBI:84964
+                state.add_feature(
+                    "oe_err_flat_stereo",
+                    "OEChem warning: unable to perceive atom stereo from a flat geometry"
+                    )
 
             elif "Warning: Internal CIP error" in msg:
-                # In CHEBI:51432
+                # 7/45043 records in ChEBI generate this feature. These are:
+                # CHEBI:51432, CHEBI:51433, CHEBI:51434, CHEBI:51435, CHEBI:51436, CHEBI:51439, CHEBI:51442
                 state.add_feature("oe_err_internal_cip_error", "OEChem warning: Internal CIP error")
 
             elif "Invalid stereochemistry specified for atom" in msg:
-                # In CHEBI:73255
+                # 6/45043 records in ChEBI generate this feature. These are:
+                # CHEBI:73255, CHEBI:79776, CHEBI:145767, CHEBI:145770, CHEBI:145771, CHEBI:145774
                 state.add_feature(
                     "oe_err_invalid_atom_stereo_specified",
                     "OEChem warning: invalid atom stereochemistry specified atom",
@@ -1218,8 +1234,12 @@ class OEWarningFeatureTool(FeatureTool):
                 raise AssertionError("Unknown OE warning:", msg)
 
         if 2 <= num_bad_stereo <= 5:
+            # 236/45043 records in ChEBI generate this feature. First few are:
+            # CHEBI:15387, CHEBI:15398, CHEBI:15982, CHEBI:16060, CHEBI:16304,
+            # CHEBI:16379, CHEBI:16829, CHEBI:17679, CHEBI:18319, CHEBI:18406
             state.add_feature("oe_err_AS_2_5", "OEChem warning: between 2 and 5 atom stereochemistry warnings")
         if 6 <= num_bad_stereo:
+            # No records in ChEBI have this many warnings
             state.add_feature("oe_err_AS_6_", "OEChem warning: 6 or more atom stereochemistry warnings")
     
 class OEAtomCountFeatureTool(FeatureTool):
@@ -1258,14 +1278,20 @@ def handle_openeye_exception(err, state):
                 continue
             
             if "Problematic atoms" in line:
+                # 15222/45043 records in ChEBI. First few are:
+                # CHEBI:598, CHEBI:1148, CHEBI:1624, CHEBI:1722, CHEBI:2376,
+                # CHEBI:2914, CHEBI:2955, CHEBI:3013, CHEBI:3082, CHEBI:3084
                 state.add_feature("oe_off_undef_stereo_atom", "OpenEyeToolkitWrapper: undefined atom stereochemistry")
                 continue
             if line.startswith("Atom atomic num:"):
                 continue
             if line.startswith("bond order: "):
                 continue
-
+            
             if "Problematic bonds are:" in line:
+                # 684/45043 records in ChEBI. First few are:
+                # CHEBI:2639, CHEBI:6802, CHEBI:15353, CHEBI:15426, CHEBI:15427,
+                # CHEBI:15639, CHEBI:15682, CHEBI:15715, CHEBI:15728, CHEBI:15766
                 state.add_feature("oe_off_undef_stereo_bond", "OpenEyeToolkitWrapper: undefined bond stereochemistry")
                 continue
 
@@ -1849,25 +1875,48 @@ def rd_to_smiles(rd_wrapper, topology, state):
         with capture_stderr_rdkit():
             return rd_wrapper.to_smiles(topology)
     except AssertionError as err:
-        # CHEBI:57439
+        # Be careful about which AssertionError was caught.
+        # Figure out the function which raise the exception.
+        co_name = _get_exception_co_name(err)
+        if co_name == "_assign_rdmol_bonds_stereo":
+            # 17/45043 records in ChEBI generated this feature. These are:
+            # CHEBI:15619, CHEBI:16098, CHEBI:33084, CHEBI:37520, CHEBI:37521,
+            # CHEBI:37523, CHEBI:37524, CHEBI:47957, CHEBI:49388, CHEBI:57439,
+            # CHEBI:57639, CHEBI:85275, CHEBI:85276, CHEBI:85659, CHEBI:87674,
+            # CHEBI:132452, CHEBI:146182
+            state.add_feature(
+                "xcmp_rd2rd_smi_assert_bonds_stereo_err",
+                "Assertion error in _assign_rdmol_bonds_stereo converting RD topology to SMILES using RD wrapper")
+            return None
+        if co_name == "_flip":
+            state.add_feature(
+                "xcmp_rd2rd_smi_assert_bonds_flip_err",
+                "Assertion error in _flip converting RD topology to SMILES using RD wrapper")
+            return None
+            
+
+        # I don't know what this is.
         state.add_feature(
             "xcmp_rd2rd_smi_assert_err",
             "Assertion error converting RD topology to SMILES using RD wrapper")
         state.reporter.unexpected_error(
-            state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
+            state.id, f"Cannot convert RD topology to SMILES using RD wrapper: AssertionError: {err} in {co_name}")
         return None
     except KeyError:
-        # CHEBI:73255, CHEBI:60153
+        # 4/45043 records in ChEBI generated this feature. These are:
+        # CHEBI:52729, CHEBI:52748, CHEBI:52749, CHEBI:60153
         state.add_feature(
             "xcmp_rd2rd_smi_keyerror_err",
-            "Assertion error converting RD topology to SMILES using RD wrapper")
+            "KeyError error converting RD topology to SMILES using RD wrapper")
         ## state.reporter.unexpected_error(
         ##     state.id, f"Cannot convert RD topology to SMILES using RD wrapper: {err}")
         return None
     except Chem.AtomValenceException as err:
-        # CHEBI:149672
+        raise
+        # 1/45043 records in ChEBI generated this feature. This one is:
+        # CHEBI:149672 XXX VERIFY
         state.add_feature(
-            "xcmp_rd2rd_smi_valence",
+            "xcmp_rd2rd_smi_valence_err",
             "AtomValenceException converting RD topology to SMILES using RD wrapper")
         return
     
@@ -1893,25 +1942,36 @@ class RDWarningFeatureTool(FeatureTool):
             elif "not removing hydrogen atom with dummy atom neighbors" in msg:
                 state.add_feature("rd_warn_DummyH", "RDKit warning: not removing hydrogen atom with dummy atom neighbors")
             elif "Warning: molecule is tagged as 3D, but all Z coords are zero" in msg:
+                # 2/45043 records in ChEBI generated this feature. These two are:
+                # CHEBI:23292, CHEBI:79184
                 state.add_feature("rd_err_3D_zero", "RDKit warning: molecule is tagged as 3d, but all Z coords are zero")
             elif "Explicit valence for atom" in msg:
                 ## # Explicit valence for atom # 12 N, 4, is greater than permitted
-                ## terms = msg.split()
-                ## i = terms.index("#")
-                ## # Make something like "N4"
-                ## atom_valence = terms[i+2].rstrip(",") + terms[i+3].rstrip(",")
-                ## state.add_feature(f"rd_err_valence_{atom_valence}")
+                # 306/45043 records in ChEBI generated this feature. The first few are:
+                # CHEBI:15432, CHEBI:15433, CHEBI:15434, CHEBI:27899,
+                # CHEBI:28163, CHEBI:28783, CHEBI:33101, CHEBI:33908,
+                # CHEBI:36183, CHEBI:36190, CHEBI:36203, CHEBI:49805,
+                # CHEBI:49851, CHEBI:50385, CHEBI:50388, CHEBI:60357,
+                # CHEBI:3793, CHEBI:3794, CHEBI:3795, CHEBI:3796, CHEBI:3814
                 state.add_feature(f"rd_err_valence", "RDKit warning: explicit valence for atom is greater than permitted")
             elif "Can't kekulize mol" in msg:
                 # Can't kekulize mol.  Unkekulized atoms: 1 3 5 7 8
+                # 3/45043 records in ChEBI generated this feature. These are:
+                # CHEBI:26401, CHEBI:26533, CHEBI:26630
                 state.add_feature("rd_err_kekulize", "RDKit warning: could not kekulize molecule")
             elif "Could not sanitize molecule ending" in msg:
                 state.add_feature("rd_err_sanitize", "RDKit warning: could not sanitize molecule")
 
             elif ("has specified valence" in msg and
                       "smaller than the drawn valence" in msg):
-                state.add_feature("rd_err_drawn_valence_mismatch", "RDKit warning: specified valence is smaller than the drawn valence")
+                # 1/45043 records in ChEBI generated this feature. This one is:
+                # CHEBI:30668
+                state.add_feature(
+                    "rd_err_drawn_valence_mismatch",
+                    "RDKit warning: specified valence is smaller than the drawn valence")
             elif ("Unrecognized radical value" in msg):
+                # 1/45043 records in ChEBI generated this feature. This one is:
+                # CHEBI:51383
                 state.add_feature("rd_err_unrecognized_radical", "RDKit warning: unrecognized radical value")
             elif (
                     msg == 'RDKit ERROR: ' or
@@ -1934,7 +1994,8 @@ class RDWarningFeatureTool(FeatureTool):
                     "ERROR: Unknown element(s): " in msg or
                     "ERROR: Unknown element '" in msg or
                     "WARNING: Omitted undefined stereo" in msg or
-                    "WARNING: Proton(s) added/removed" in msg
+                    "WARNING: Proton(s) added/removed" in msg or
+                    "Metal was disconnected" in msg
                     ):
                 # InChI warnings  and errors. Ignore because they
                 # don't seem synchronized with the rest of RDKit.
@@ -1946,6 +2007,17 @@ class RDWarningFeatureTool(FeatureTool):
             elif (msg == ""):
                 pass
             elif "Conflicting single bond directions around double bond" in msg:
+                # 38/45043 records in ChEBI generated this feature. These are:
+                # CHEBI:4309, CHEBI:9997, CHEBI:15617, CHEBI:15618,
+                # CHEBI:18003, CHEBI:29044, CHEBI:35305, CHEBI:19448,
+                # CHEBI:19450, CHEBI:35332, CHEBI:35333, CHEBI:35334,
+                # CHEBI:35335, CHEBI:39255, CHEBI:39256, CHEBI:39257,
+                # CHEBI:47955, CHEBI:51979, CHEBI:51980, CHEBI:51981,
+                # CHEBI:51982, CHEBI:57437, CHEBI:57438, CHEBI:58346,
+                # CHEBI:58348, CHEBI:58349, CHEBI:61471, CHEBI:61493,
+                # CHEBI:61494, CHEBI:61495, CHEBI:61496, CHEBI:78156,
+                # CHEBI:83924, CHEBI:83926, CHEBI:83927, CHEBI:83929,
+                # CHEBI:83930, CHEBI:83931
                 state.add_feature(
                     "rd_err_conflicting_dirs",
                     "RDKit warning: conflicting single bond directions around double bond",
@@ -1953,6 +2025,12 @@ class RDWarningFeatureTool(FeatureTool):
             elif "BondStereo set to STEREONONE and single bond directions" in msg:
                 pass
             else:
+                state.add_feature(
+                    "rd_err_unknown_err", "Unknown RDKit message")
+                state.reporter.unexpected_error(
+                    state.id,
+                    r"Unexpected RDKit message {msg!r}",
+                    )
                 raise AssertionError("What is this error?", msg)
 
 class RDAtomCountFeatureTool(FeatureTool):
@@ -1993,15 +2071,9 @@ def handle_rdkit_exception(err, state):
                 continue
             if "- Bond" in line and "(atoms " in line:
                 state.add_feature("rd_off_undef_stereo_bond", "RDKitToolkitWrapper: undefined bond stereochemistry")
-                ## terms = line.split()
-                ## s = terms[-1].replace("-","_").strip("()")
-                ## state.add_feature(f"rd_uBS_{s}")
                 continue
             if "- Atom" in line and "(index" in line:
                 state.add_feature("rd_off_undef_stereo_atom", "RDKitToolkitWrapper: undefined atom stereochemistry")
-                ## terms = line.split()
-                ## s = terms[2]
-                ## state.add_feature(f"rd_uAS_{s}")
                 continue
             raise AssertionError(line) # Don't know what this is.
 
@@ -2011,11 +2083,6 @@ def handle_rdkit_exception(err, state):
         # rdkit.Chem.rdchem.AtomValenceException:
         #   Explicit valence for atom # 0 Ge, 6, is greater than permitted
         state.add_feature("rd_off_rd_valence", "RDKit error: explicit atom valence is greater than permitted")
-        ## msg = str(err)
-        ## terms = msg.split()
-        ## i = terms.index("#")
-        ## atom_symbol = terms[i+2].strip(",")
-        ## state.add_feature(f"rd_err_valence_{atom_symbol}")
         return True
         
     return False
@@ -2473,6 +2540,16 @@ class XCompareCountsFeatureTool(FeatureTool):
         if oe_num_atoms == rd_num_atoms:
             state.add_feature("xcmp_natom_ok", "OpenEye and RDKit wrappers have the same atom counts")
         else:
+            # 27/45043 records in ChEBI generated this feature. These are:
+            # 27/45043 records in ChEBI generated this feature. These are:
+            # CHEBI:49920, CHEBI:29102, CHEBI:29104, CHEBI:29275,
+            # CHEBI:29390, CHEBI:29941, CHEBI:30137, CHEBI:30144,
+            # CHEBI:30167, CHEBI:30506, CHEBI:30562, CHEBI:30579,
+            # CHEBI:30584, CHEBI:30591, CHEBI:30595, CHEBI:32213,
+            # CHEBI:33496, CHEBI:33503, CHEBI:35828, CHEBI:35829,
+            # CHEBI:37117, CHEBI:37130, CHEBI:50000, CHEBI:52729,
+            # CHEBI:52748, CHEBI:52749, CHEBI:60153
+            # None seem relevant to OpenFF
             state.add_feature("xcmp_natom_err", "OpenEye and RDKit wrappers have different atom counts")
             
         oe_num_bonds = state.oe_topology.n_bonds
@@ -2481,6 +2558,8 @@ class XCompareCountsFeatureTool(FeatureTool):
         if oe_num_bonds == rd_num_bonds:
             state.add_feature("xcmp_nbond_ok", "OpenEye and RDKit wrappers have the same bond counts")
         else:
+            # 27/45043 records in ChEBI generated this feature.
+            # These are the same as those with a mismatched number of atoms.
             state.add_feature("xcmp_nbond_err", "OpenEye and RDKit wrappers have different bond counts")
 
 # This can happen if RDKitToolkitWrapper created the OpenFF molecule then
@@ -2490,12 +2569,31 @@ class XCompareCountsFeatureTool(FeatureTool):
 def handle_to_openeye_exception(prefix, err, state):
     err_msg = str(err)
     if "OpenEye bond stereochemistry assumptions failed." in err_msg:
+        # 64/45043 records in ChEBI generated this message.
+        #
+        # A) 6 with isomorphism_oe_bond_assumptions_failed_err but not xcmp_rd2oe_smi_oe_bond_assumptions_failed_err
+        # CHEBI:33084, CHEBI:37520, CHEBI:37521, CHEBI:37523, CHEBI:37524, CHEBI:87674
+        #
+        # B) None with xcmp_rd2oe_smi_oe_bond_assumptions_failed_err but not isomorphism_oe_bond_assumptions_failed_err
+        #
+        # C) 58 with both errors. First few are:
+        # CHEBI:15430, CHEBI:15436, CHEBI:27484, CHEBI:27609,
+        # CHEBI:28421, CHEBI:37447, CHEBI:44898, CHEBI:8337,
+        # CHEBI:9437, CHEBI:33222, CHEBI:34921, CHEBI:36159,
+        # CHEBI:36160, CHEBI:36304, CHEBI:36779, CHEBI:38250,
+        # CHEBI:38256, CHEBI:38257, CHEBI:38258, CHEBI:41213,
+        # CHEBI:44085, CHEBI:47035, CHEBI:48398, CHEBI:48399
         state.add_feature(
             f"{prefix}_oe_bond_assumptions_failed_err",
             "OpenEye bond stereochemistry assumptions failed")
         return True
     
     elif "OpenEye atom stereochemistry assumptions failed." in err_msg:
+        # 120/45043 records in ChEBI generated this message.
+        # All 120 contained both
+        #   xcmp_rd2oe_smi_oe_atom_assumptions_failed_err
+        # and
+        #   isomorphism_oe_atom_assumptions_failed_err
         state.add_feature(
             f"{prefix}_oe_atom_assumptions_failed_err",
             "OpenEye atom stereochemistry assumptions failed")
@@ -2536,6 +2634,7 @@ class XCompareIsomorphicFeatureTool(FeatureTool):
             if handle_to_openeye_exception("isomorphism", err, state):
                 pass
             else:
+                # No ChEBI records generated this path
                 state.add_feature("xcmp_isomorphism_fail_unknown", "Unknown is_isomorphic_with error")
                 state.reporter.unexpected_error(
                     state.id, f"Cannot compare isomorphism: {err}")
@@ -2544,9 +2643,21 @@ class XCompareIsomorphicFeatureTool(FeatureTool):
         if is_isomorphic:
             state.add_feature("xcmp_isomorphic_ok", "OE and RD topologies are isomorphic")
         else:
+            # 1093/45043 records in ChEBI. First few are:
+            # CHEBI:3319, CHEBI:3749, CHEBI:3900, CHEBI:4315, CHEBI:5981, CHEBI:7627,
+            # CHEBI:9110, CHEBI:9150, CHEBI:15406, CHEBI:15653, CHEBI:15665, CHEBI:15730,
+            # CHEBI:15861, CHEBI:16616, CHEBI:16685, CHEBI:16775, CHEBI:17177, CHEBI:17205,
+            # CHEBI:17217, CHEBI:17236
             state.add_feature("xcmp_isomorphic_err", "OE and RD topologies are not isomorphic")
 
 
+def _get_exception_co_name(err):
+    tb = err.__traceback__
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    co_name = tb.tb_frame.f_code.co_name
+    return co_name
+            
 class XCompareSmilesFeatureTool(FeatureTool):
     @staticmethod
     def add_arguments(parser):
@@ -2594,6 +2705,12 @@ class XCompareSmilesFeatureTool(FeatureTool):
                 "xcmp_oe2oe_rd2rd_smi_natoms_ok",
                 "RD and OE same-toolkit SMILES have the same atom counts")
         else:
+            # 23/45043 records in ChEBI.
+            # CHEBI:49920, CHEBI:29102, CHEBI:29104, CHEBI:29275, CHEBI:29390,
+            # CHEBI:29941, CHEBI:30137, CHEBI:30144, CHEBI:30167, CHEBI:30506,
+            # CHEBI:30562, CHEBI:30579, CHEBI:30584, CHEBI:30591, CHEBI:30595,
+            # CHEBI:32213, CHEBI:33496, CHEBI:33503, CHEBI:35828, CHEBI:35829,
+            # CHEBI:37117, CHEBI:37130, CHEBI:50000
             state.add_feature(
                 "xcmp_oe2oe_rd2rd_smi_natoms_err",
                 "RD and OE same-toolkit SMILES have different atom counts")
@@ -2604,17 +2721,16 @@ class XCompareSmilesFeatureTool(FeatureTool):
             with capture_stderr_rdkit():
                 rd_oe_smi = self.rd_wrapper.to_smiles(oe_topology)
         except Chem.AtomValenceException as err:
+            # I have these here but I can't find the test case that triggers it.
             state.add_feature("xcmp_oe2rd_smi_valence_err",
                                   "RDKit valence error converting OE topology to SMILES using RD")
             return
         except AssertionError as err:
             # Be careful about which AssertionError was caught.
             # Figure out the function which raise the exception.
-            tb = err.__traceback__
-            while tb.tb_next is not None:
-                tb = tb.tb_next
-            co_name = tb.tb_frame.f_code.co_name
+            co_name = _get_exception_co_name(err)
             if co_name == "_flip":
+                # CHEBI:15653, CHEBI:36438, CHEBI:26116, CHEBI:77803
                 state.add_feature(
                     "xcmp_oe2rd_smi_flip_err",
                     "RDKit failed to flip bonds correctly",
@@ -2639,9 +2755,12 @@ class XCompareSmilesFeatureTool(FeatureTool):
                 "OE generated SMILES from RD and OE are the same",
                 )
         else:
-            ## TODO:  for some reason this is always incorrect?
-            # 
             #sys.stderr.write(f"\nQQOE2 {state.id!r}\n  {oe_smi}\n  {oe_rd_smi}\n")
+            # 1101/45043 records in ChEBI. First few are:
+            # CHEBI:3319, CHEBI:3749, CHEBI:3900, CHEBI:4315, CHEBI:5981,
+            # CHEBI:7627, CHEBI:9110, CHEBI:9150, CHEBI:15406, CHEBI:15665,
+            # CHEBI:15730, CHEBI:15854, CHEBI:15861, CHEBI:16616, CHEBI:16685,
+            # CHEBI:16775, CHEBI:17177, CHEBI:17205, CHEBI:17217, CHEBI:17236
             state.add_feature(
                 "xcmp_oe2oe_rd2oe_smi_err",
                 "OE generated SMILES from RD and OE differ",
@@ -2654,6 +2773,11 @@ class XCompareSmilesFeatureTool(FeatureTool):
                 )
         else:
             #sys.stderr.write(f"\nQQRD2 {state.id!r}\n  {rd_smi}\n  {rd_oe_smi}\n")
+            # 1056/45043 records in ChEBI. First few are:
+            # CHEBI:3319, CHEBI:3749, CHEBI:3900, CHEBI:4315, CHEBI:5981, CHEBI:7627,
+            # CHEBI:9110, CHEBI:9150, CHEBI:15406, CHEBI:15665, CHEBI:15730,
+            # CHEBI:15854, CHEBI:15861, CHEBI:16616, CHEBI:16685, CHEBI:16775,
+            # CHEBI:17177, CHEBI:17205, CHEBI:17217, CHEBI:17236
             state.add_feature(
                 "xcmp_oe2rd_rd2rd_smi_err",
                 "RD generated SMILES from RD and OE differ",
@@ -2699,7 +2823,9 @@ class XCompareInChIFeatureTool(FeatureTool):
             with capture_stderr_rdkit():
                 rd_inchi = self.rd_wrapper.to_inchi(rd_topology)
         except AssertionError:
-            state.add_feature("xcmp_rd2rd_inchi_assert_err")
+            state.add_feature(
+                "xcmp_rd2rd_inchi_assert_err",
+                "AssertionError trying to convert RD topology to InChI using RD wrapper")
             return
         state.add_feature("xcmp_rd2rd_inchi_ok", "Can convert RD topology to InChI using RD wrapper")
 
@@ -2784,7 +2910,8 @@ def xcompare_command(parser, args):
     description_logger = get_description_logger(parser, args.description)
     
     for recno, (id, record) in enumerate(reader, 1):
-        assert id, f"Missing id for record #{recno}"
+        if not id:
+            raise ValueError(f"Missing id for record #{recno}")
         state = State(id, record, reporter,
                           description_logger = description_logger)
         if seen_ids_filter is not None and seen_ids_filter.at_start(state):
@@ -2836,7 +2963,6 @@ def xcompare_command(parser, args):
                     try:
                         feature_tool.add_features(state)
                     except Exception as err:
-                        raise
                         reporter.unexpected_error(
                             id, f"failure in {feature_tool}: {err}"
                             )
