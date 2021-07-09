@@ -895,8 +895,8 @@ class State:
 
 
     def add_feature(self, feature, description=None):
-        if description is None and "=" not in feature:
-            raise AssertionError("Missing description", feature)
+        ## if description is None and "=" not in feature:
+        ##     raise AssertionError("Missing description", feature)
         self.features.add(feature)
         if description is not None and self.description_logger is not None:
             self.description_logger.add(feature, description)
