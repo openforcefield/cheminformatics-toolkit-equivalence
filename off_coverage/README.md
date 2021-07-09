@@ -951,15 +951,21 @@ llib.parse func: urlsplit <pairs: [(0,418),(418,419),(419,420),(420,421),(421,42
 0), (460,461),(461,462),(462,464),(464,465),(465,466),(466,467),(467,-935)]>>
 ```
 
-This requires a lot of staring, but I think it's due to the fragment
-in the URL, which exercises the pairs (460,461) and (461,462).
+More analysis shows the unique branch points are:
+
+```
+(460, 461), (461, 462)
+```
+
+This corresponds to the following lines from `urllib.parse`:
 
 ```
 460:   if allow_fragments and '#' in url:
 461:        url, fragment = url.split('#', 1)
 ```
 
-This is where a visualization tool would be helpful.
+Doing this manually was a pain. This is where a visualization tool
+would be helpful.
 
 Anyway, there are multiple solutions. lf I prefer one with smaller URL
 lengths, I'll ask to minize also by `n`, which was a feature weight I
@@ -971,6 +977,18 @@ Solution: optimal Selected: 4/9
 1	https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
 1	http://localhost:8080
 1	https://chemfp.com
+1	https://www.google.com/search?q=chemfp
+```
+
+Or, if I really wanted ftp URLS, I can weight that one post hoc by
+looking for "ftp" in the special "ID" variable:
+
+```
+% python off_coverage.py minimize urlparse.feats -q --weight '("ftp" not in ID)*100'
+Solution: optimal Selected: 4/9
+1	https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+1	http://localhost:8080
+1	ftp://ftp.ncbi.nlm.nih.gov/pubchem/
 1	https://www.google.com/search?q=chemfp
 ```
 
