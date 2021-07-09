@@ -423,7 +423,7 @@ class CallCoverage:
     def record(self, id):
         state = State(id, None, get_reporter(quiet=True), description_logger = self.description_logger)
         with self.tracer.using_state(state):
-            yield
+            yield state
         write_features(self.outfile, id, state.features)
         
 
