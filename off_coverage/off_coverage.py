@@ -364,8 +364,8 @@ _trace_options = {
 
 _trace_options["on"] = _trace_options["func-pairs"]
     
-def get_tracer(trace_type=None):
-    module_names = set(["openff.", "toolkit.tests."])
+def get_tracer(trace_type=None, modules=["openff.", "toolkit.tests."]):
+    module_names = set(modules)
     
     if trace_type is None or trace_type == "off":
         return NullTracer()
@@ -376,8 +376,9 @@ def get_tracer(trace_type=None):
 
     return ToolkitTracer(module_names, module_tracer_class, function_tracer_class)
 
-def open_call_coverage(filename, trace_type="func-pairs", append=False):
-    tracer = get_tracer(trace_type)
+def open_call_coverage(filename, trace_type="func-pairs", append=False,
+                           modules=["openff.", "toolkit.tests."]):
+    tracer = get_tracer(trace_type, modules=modules)
     
     description_filename = filename + ".description"
     if append and os.path.exists(description_filename):
