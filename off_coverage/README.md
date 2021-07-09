@@ -856,6 +856,7 @@ urls = [
 
 # Record coverage analysis to "urlparse.feats".
 # There will be one record per line.
+# The default uses trace_type="func-pairs".
 coverage = off_coverage.open_call_coverage(
     "urlparse.feats",
     modules = [
