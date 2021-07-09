@@ -1004,6 +1004,23 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## Changes
 
+### Version 1.0 - 9 July 2021
+
+- change the structure input routines to always use OpenFF to parse
+the structure records
+
+- added `--description` option to get a mapping from feature names to
+a more readable description.
+
+- new subcommand to `subtract` one set of features from another
+
+- added programmatic access to the call coverage utility
+
+- improved error handling for ChEBI test cases
+
+- disallow inputs with atomic number of 0 (eg, `*` in SMILES, or
+R-groups in SDF records).
+
 ### Version 0.9 - 8 June 2021
 
 - fixed `--circular` bug reported by Rajarshi Guha
