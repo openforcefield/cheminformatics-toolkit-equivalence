@@ -1995,7 +1995,15 @@ class RDWarningFeatureTool(FeatureTool):
                     "ERROR: Unknown element '" in msg or
                     "WARNING: Omitted undefined stereo" in msg or
                     "WARNING: Proton(s) added/removed" in msg or
-                    "Metal was disconnected" in msg
+                    "Metal was disconnected" in msg or
+                    "Salt was disconnected; Proton(s) added/removed" in msg or
+                    "WARNING: anged" in msg or
+                    "WARNING: Accepted unusual valence" in msg or
+                    "WARNING: Charges neutralized" in msg or
+                    # InChI messages may fold over mulitple lines.
+                    # These can be identified as lines with no timestamp.
+                    (msg.startswith("RDKit WARNING: ") and
+                     not msg.startswith("RDKit WARNING: ["))
                     ):
                 # InChI warnings  and errors. Ignore because they
                 # don't seem synchronized with the rest of RDKit.
@@ -2029,9 +2037,9 @@ class RDWarningFeatureTool(FeatureTool):
                     "rd_err_unknown_err", "Unknown RDKit message")
                 state.reporter.unexpected_error(
                     state.id,
-                    r"Unexpected RDKit message {msg!r}",
+                    f"Unexpected RDKit message {msg!r}",
                     )
-                raise AssertionError("What is this error?", msg)
+                #raise AssertionError("What is this error?", msg)
 
 class RDAtomCountFeatureTool(FeatureTool):
     @staticmethod
