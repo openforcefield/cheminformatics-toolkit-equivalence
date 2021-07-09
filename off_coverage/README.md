@@ -822,6 +822,159 @@ Solution: optimal Selected: 1/3
 
 ## Programmatic interface
 
+If you put `off_coverage.py` in an importable directory, or install it
+via the included `setup.py`, then you can use some of the tracing code
+in your own software.
+
+Be aware that it was not developed as a tool for general use. If it
+works outside of the OpenFF context it was developed for - cool!
+
+
+What code paths does Python's
+[urlparse](https://docs.python.org/3/library/urllib.parse.html#urllib.parse.urlparse)
+use to parse different URLs? The following uses off_coverage for a
+coverage analysis of a list of URLs. It sets up a CallCoverage
+instance, which can create a context manager to be report coverage for
+a named test case.
+
+```
+import off_coverage
+
+from urllib.parse import urlparse
+
+urls = [
+    "https://openforcefield.org/",
+    "https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples",
+    "http://dalkescientific.com/",
+    "http://localhost:8080",
+    "https://chemfp.com",
+    "ftp://ftp.ncbi.nlm.nih.gov/pubchem/",
+    "https://www.ebi.ac.uk/chembl/",
+    "https://www.google.com/search?q=chemfp",
+    "ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/",
+]
+
+# Record coverage analysis to "urlparse.feats".
+# There will be one record per line.
+coverage = off_coverage.open_call_coverage(
+    "urlparse.feats",
+    modules = [
+        "urllib.",  # limit coverage to modules under urllib
+        ]
+        )
+
+for url in urls:
+    # Start tracing.
+    # Use the url as the record name.
+    with coverage.record(url) as state:
+        # Add a 'n' feature weight using the URL length
+        state.add_feature(f"n={len(url)}")
+        # Parse the url.
+        urlparse(url)
+```
+
+I'll run it the program generate the coverage information:
+
+```
+% python url_check.py
+```
+
+This generated the output file `urlparse.feats` and the description
+output file `urlparse.feats.description`. I'll use the feature file to
+generate a minimal set:
+
+```
+% python off_coverage.py minimize urlparse.feats -q
+Solution: optimal Selected: 4/9
+1	https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+1	http://localhost:8080
+1	ftp://ftp.ncbi.nlm.nih.gov/pubchem/
+1	https://www.google.com/search?q=chemfp
+```
+
+To help figure out what's going on, here's a program to show which
+URLs trigger the different code paths:
+
+```
+from collections import defaultdict
+d = defaultdict(list)
+for line in open("urlparse.feats"):
+    id, _, rest = line.rstrip("\n").partition("\t")
+    for feature in rest.split():
+        if feature.startswith("trace_"):
+            d[feature].append(id)
+for trace, ids in sorted(d.items()):
+    print(trace)
+    for id in ids:
+        print("  ", id)
+```
+
+This generates:
+
+```
+trace_00506cf40fe57c67f606f344c6ddccdbe14708c32a323fabe05adb9bb101e4ea
+   https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+trace_0a3380a6bacc6f08bcf5fc06eb75c84847760a9a8058a5d823065f807a23967b
+   https://openforcefield.org/
+   https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+   http://dalkescientific.com/
+   http://localhost:8080
+   https://chemfp.com
+   ftp://ftp.ncbi.nlm.nih.gov/pubchem/
+   https://www.ebi.ac.uk/chembl/
+   https://www.google.com/search?q=chemfp
+   ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/
+trace_2f7a951665e32c43625f0c07b81bbed5bfed4e77f5ed03d0e0004220263193ce
+   https://openforcefield.org/
+   https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+   https://chemfp.com
+   ftp://ftp.ncbi.nlm.nih.gov/pubchem/
+   https://www.ebi.ac.uk/chembl/
+   https://www.google.com/search?q=chemfp
+   ftp://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/latest/
+trace_42802f38c3da956be66675d79c10c2e66d1c7bd560c9b6e46bde8f826672140a
+   http://dalkescientific.com/
+   http://localhost:8080
+trace_43c7927193fe14c0dae2ab8cd84e6bc18e33c36d21e1e169bf9b27c36a73a0ec
+https://www.google.com/search?q=chemfp
+```
+
+What is "trace_00506cf...", which is only visited by the GitHub URL?
+
+```
+% grep trace_00506cf urlparse.feats.description | fold
+trace_00506cf40fe57c67f606f344c6ddccdbe14708c32a323fabe05adb9bb101e4ea	<mod: ur
+llib.parse func: urlsplit <pairs: [(0,418),(418,419),(419,420),(420,421),(421,42
+2),(422,424),(424,426),(426,427),(427,428),(428,429),(429,444),(444,445),(444,45
+0),(445,444),(450,451),(451,453),(453,455),(455,456),(456,457),(457,458),(458,46
+0), (460,461),(461,462),(462,464),(464,465),(465,466),(466,467),(467,-935)]>>
+```
+
+This requires a lot of staring, but I think it's due to the fragment
+in the URL, which exercises the pairs (460,461) and (461,462).
+
+```
+460:   if allow_fragments and '#' in url:
+461:        url, fragment = url.split('#', 1)
+```
+
+This is where a visualization tool would be helpful.
+
+Anyway, there are multiple solutions. lf I prefer one with smaller URL
+lengths, I'll ask to minize also by `n`, which was a feature weight I
+added in `url_check.py`:
+
+```
+% python off_coverage.py minimize urlparse.feats -q --weight n
+Solution: optimal Selected: 4/9
+1	https://github.com/openforcefield/openff-toolkit/tree/master/examples#index-of-provided-examples
+1	http://localhost:8080
+1	https://chemfp.com
+1	https://www.google.com/search?q=chemfp
+```
+
+
+
 ## Legal
 
 This program was written by Andrew Dalke <dalke@dalkescientific.com>,
